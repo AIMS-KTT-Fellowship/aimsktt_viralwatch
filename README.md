@@ -1,8 +1,8 @@
-# Day1_G1_Respo1
+# aimsktt_viralwatch
 
 
 Now First We are Creating the file sturacture as follow -
- Day1_G1_Respo1-BDBV2026_Project1/
+ aimsktt_viralwatch-BDBV2026_Project1/
 ├── data/
 │   ├── raw/
 │   ├── processed/
