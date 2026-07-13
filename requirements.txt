@@ -1,0 +1,13 @@
+
+pandas
+numpy
+scikit-learn
+matplotlib
+seaborn
+jupyter
+requests
+beautifulsoup4
+lxml
+pdfplumber
+joblib
+pytest
