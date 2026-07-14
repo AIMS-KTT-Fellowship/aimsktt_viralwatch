@@ -1,56 +1,42 @@
-cat << 'EOF' > download_data.sh
 #!/bin/bash
 set -e
 
+# Target repository to clone from
 REPO_URL="https://github.com/INRB-UMIE/BDBV2026-Data.git"
 REPO_DIR="BDBV2026-Data"
 
-echo "=== 1. Cleaning local directories ==="
+echo "🧹 Preparing local directories..."
 rm -rf data_test
 mkdir -p data_test
 
-echo "=== 2. Testing Repository Reachability ==="
-if git ls-remote "$REPO_URL" > /dev/null 2>&1; then
-    echo "✔ Connection successful! The GitHub repository is reachable."
-else
-    echo "❌ CONNECTION ERROR: Cannot reach $REPO_URL. Check your internet connection or repository permissions." >&2
-    exit 1
-fi
-
-echo "=== 3. Cloning Repository ==="
+echo "🚀 Cloning BDBV2026-Data Repository..."
 rm -rf "$REPO_DIR"
-# Clone without depth limitation to ensure we grab everything
 git clone "$REPO_URL"
 
-echo "=== 4. Diagnosing Repository Structure ==="
-echo "📂 Top-level files and folders inside cloned repo:"
-ls -la "$REPO_DIR"
+echo "🔍 Searching and copying target dataset files..."
 
-echo "🔍 Searching for ANY CSV files recursively..."
-find "$REPO_DIR" -name "*.csv"
+# Find and copy files, renaming them to match your pipeline's target expectations
+find "$REPO_DIR" -name "*cases*.csv" -o -name "*Cases*.csv" -exec cp {} data_test/BDBV2026_Cases_HA.csv \;
+find "$REPO_DIR" -name "*displacement*.csv" -o -name "*idp*.csv" -exec cp {} data_test/idp_displacement.csv \;
+find "$REPO_DIR" -name "*vulnerability*.csv" -o -name "*ccvi*.csv" -exec cp {} data_test/ccvi_vulnerability_index.csv \;
+find "$REPO_DIR" -name "*mobility*.csv" -o -name "*flowminder*.csv" -exec cp {} data_test/flowminder_mobility.csv \;
 
-echo "=== 5. Copying CSVs if they exist ==="
-CSV_FOUND=$(find "$REPO_DIR" -name "*.csv" | wc -l)
-
-if [ "$CSV_FOUND" -gt 0 ]; then
-    echo "✔ Found $CSV_FOUND CSV files! Copying them to data_test/..."
+# If recursive exact matches failed, fallback to copy any available CSVs into data_test/
+CSV_COPIED=$(ls -1 data_test/*.csv 2>/dev/null | wc -l)
+if [ "$CSV_COPIED" -eq 0 ]; then
+    echo "⚠️ Target file names not found. Harvesting all available CSV files..."
     find "$REPO_DIR" -name "*.csv" -exec cp {} data_test/ \;
-else
-    echo "⚠️ WARNING: No files with extension '.csv' were found."
-    echo "Checking for alternative formats or compressed files..."
-    ls -R "$REPO_DIR"
 fi
 
-echo "=== 6. Fetching WHO Bulletins ==="
+echo "🌍 Downloading supplementary WHO Outbreak bulletins..."
 curl -L -s -o data_test/DON602.html "https://www.who.int/emergencies/disease-outbreak-news/item/DON602"
 curl -L -s -o data_test/DON603.html "https://www.who.int/emergencies/disease-outbreak-news/item/DON603"
 
-echo "=== 7. Final Verification ==="
-CSV_COUNT=$(ls data_test/*.csv 2>/dev/null | wc -l)
-if [ "$CSV_COUNT" -gt 0 ]; then
-    echo "✔ Ingestion successful! $CSV_COUNT files copied to data_test/."
+# Final validation
+FINAL_COUNT=$(ls -1 data_test/*.csv 2>/dev/null | wc -l)
+if [ "$FINAL_COUNT" -gt 0 ]; then
+    echo "✔ Ingestion Complete! $FINAL_COUNT dataset files successfully copied to data_test/."
 else
-    echo "❌ INGESTION ERROR: No CSV files are present in data_test/."
+    echo "❌ INGESTION ERROR: No CSV data files could be retrieved." >&2
     exit 1
 fi
-EOF
