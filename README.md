@@ -373,6 +373,68 @@ By continuously integrating new information while preserving historical records,
 
 
 
+Day 2 we are working on ML pipiline 
+
+Save this as Setup_project_v2_with_full_pipline.sh in the directory where you want the project, then run:
+```
+chmod +x Setup_project_v2_with_full_pipline.sh
+./Setup_project_v2_with_full_pipline.sh
+```
+After running it, your project will look like:
+
+```
+BDBV2026-Project/
+│
+├── dashboard/
+│   ├── app.py
+│   ├── assets/
+│   └── components/
+│       ├── charts.py
+│       ├── maps.py
+│       └── tables.py
+│
+├── data/
+│   ├── external/
+│   ├── processed/
+│   └── raw/
+│
+├── models/
+│
+├── notebooks/
+│
+├── reports/
+│   ├── figures/
+│   └── final_report.md
+│
+├── scripts/
+│   ├── download_data.sh
+│   ├── preprocess_data.sh
+│   └── train_model.sh
+│
+├── src/
+│   ├── __init__.py
+│   ├── data_loader.py
+│   ├── preprocess.py
+│   ├── features.py
+│   ├── target.py
+│   ├── sklearn_model.py
+│   ├── keras_model.py
+│   ├── evaluate.py
+│   └── plots.py
+│
+├── tests/
+│
+├── train.py
+├── requirements.txt
+├── README.md
+└── .venv/
+
+```
+
+Update  requirements.txt and  README.md
+
+
+
 
 
 
