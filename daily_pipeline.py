@@ -92,12 +92,11 @@ def clean_and_sync():
                 
                 subset_df = processed_df[join_keys + [metric_col]].copy()
                 
-                # We save with descriptive names: population_count and population_density
                 if "density" in name_lower:
-                    subset_df = subset_df.rename(columns={metric_col: "population_density"})
+                    subset_df = subset_df.rename(columns={metric_col: "density"})
                     worldpop_dfs["density"] = subset_df
                 else:
-                    subset_df = subset_df.rename(columns={metric_col: "population_count"})
+                    subset_df = subset_df.rename(columns={metric_col: "count"})
                     worldpop_dfs["count"] = subset_df
                 
                 continue 
@@ -127,20 +126,27 @@ def clean_and_sync():
     # ==========================================
     if worldpop_dfs["count"] is not None or worldpop_dfs["density"] is not None:
         try:
-            print("🔗 Merging WorldPop dataframes into 'worldpop_nom_count_density'...")
+            print("🔗 Merging WorldPop dataframes...")
             
             if worldpop_dfs["count"] is not None and worldpop_dfs["density"] is not None:
-                keys_count = [c for c in worldpop_dfs["count"].columns if c != "population_count"]
-                keys_density = [c for c in worldpop_dfs["density"].columns if c != "population_density"]
+                keys_count = [c for c in worldpop_dfs["count"].columns if c != "count"]
+                keys_density = [c for c in worldpop_dfs["density"].columns if c != "density"]
                 common_keys = list(set(keys_count).intersection(keys_density))
                 
                 merged_worldpop = pd.merge(worldpop_dfs["count"], worldpop_dfs["density"], on=common_keys, how="outer")
             else:
                 merged_worldpop = worldpop_dfs["count"] if worldpop_dfs["count"] is not None else worldpop_dfs["density"]
             
-            # Write unified WorldPop table to Database under the requested name
+            # 🎯 REMOVE metric columns 'count' and 'density' entirely
+            cols_to_drop = [col for col in ['count', 'density'] if col in merged_worldpop.columns]
+            merged_worldpop = merged_worldpop.drop(columns=cols_to_drop, errors='ignore')
+            
+            # De-duplicate the remaining geographic entries
+            merged_worldpop = merged_worldpop.drop_duplicates()
+            
+            # Write only geographic keys to 'worldpop_nom_count_density'
             merged_worldpop.to_sql("worldpop_nom_count_density", engine, if_exists='replace', index=False)
-            print("✔ Table 'worldpop_nom_count_density' successfully built and replaced.")
+            print("✔ Table 'worldpop_nom_count_density' successfully built (metrics removed).")
             processed_count += 1
             
         except Exception as e:
