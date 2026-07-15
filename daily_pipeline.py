@@ -49,18 +49,15 @@ def clean_and_sync():
         filename = os.path.basename(file_path)
         name_lower = filename.lower()
         
-        # Normalize double underscores to single underscores just for matching safety
-        normalized_name = name_lower.replace("__", "_")
-        
         # Determine if file is targeted
         is_matched = (
-            normalized_name.startswith("insp") or
-            normalized_name.startswith("epi_cases") or
-            normalized_name.startswith("worldpop") or
-            normalized_name.startswith("osrm") or
-            normalized_name.startswith("cross_border") or
-            normalized_name.startswith("flowminder_short") or
-            normalized_name.startswith("grid3_healthsites") or
+            name_lower.startswith("insp") or
+            name_lower.startswith("epi_cases") or
+            name_lower.startswith("worldpop_") or
+            name_lower.startswith("osrm_") or
+            name_lower.startswith("cross_border") or
+            name_lower.startswith("flowminder_short") or
+            name_lower.startswith("grid3_healthsites") or
             name_lower.endswith(".shp")
         )
         
@@ -74,9 +71,6 @@ def clean_and_sync():
                       .replace("__", "_")
                       .replace(".", "_")
                       .replace("-", "_"))
-        
-        # Clean up any residual double underscores from the table name
-        clean_name = re.sub(r'_+', '_', clean_name).strip('_')
         
         # PostgreSQL limit safety: Truncate table names if they exceed 60 characters
         if len(clean_name) > 60:
