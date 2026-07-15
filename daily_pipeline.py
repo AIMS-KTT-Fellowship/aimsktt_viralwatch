@@ -1,13 +1,12 @@
 import os
 import glob
 import pandas as pd
-import numpy as np
 from sqlalchemy import create_engine
+from data_processing import clean_dataframe, process_shapefile
 
 # 1. Fetch Aiven Connection String from Environment
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
-# Set up SQL connection (Fallback to SQLite inside data_test/ if no cloud URL is configured)
 if DATABASE_URL:
     if DATABASE_URL.startswith("postgres://"):
         DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
@@ -17,97 +16,65 @@ else:
     engine = create_engine("sqlite:///data_test/viralwatch.db")
     print("📁 DATABASE_URL not found. Saving locally to data_test/viralwatch.db.")
 
-# Translation Mapping for Bilingual Headers (French -> English)
-COLUMN_TRANSLATIONS = {
-    # Dates
-    "date_notification": "date",
-    "date_rapport": "date",
-    "jour": "date",
-    # Geography
-    "zone_de_sante": "health_zone",
-    "zone_sante": "health_zone",
-    "nom_zone": "health_zone",
-    "province": "province",
-    # Metrics
-    "cas_confirmes": "confirmed_cases",
-    "cas_suspects": "suspected_cases",
-    "deces": "deaths",
-    "gueris": "recovered"
-}
-
-# Status/Value Translations (French -> English)
-STATUS_TRANSLATIONS = {
-    "oui": "yes",
-    "non": "no",
-    "vrai": "true",
-    "faux": "false",
-    "suspect": "suspected",
-    "confirme": "confirmed",
-    "decede": "deceased"
-}
-
-def remove_accents(series):
-    """Standardizes text by stripping French accents and title-casing names."""
-    return (series.astype(str)
-            .str.normalize('NFKD')
-            .str.encode('ascii', errors='ignore')
-            .str.decode('utf-8')
-            .str.strip()
-            .str.title())
-
 def clean_and_sync():
-    print("🧹 Starting bilingual data cleaning and transformation pipeline...")
+    print("🚀 Running custom build and shapefile ingestion pipeline...")
     
-    # --- Target: Only INSP SitRep Processed Files ---
-    search_path = os.path.join("data_test", "*insp_sitrep*.csv")
-    sitrep_files = glob.glob(search_path)
+    # Gather everything saved inside data_test
+    all_files = glob.glob(os.path.join("data_test", "*"))
     
-    if sitrep_files:
-        for file_path in sitrep_files:
-            # Derive clean database table name
-            filename = os.path.basename(file_path).replace(".csv", "").lower()
-            table_name = filename.replace("__", "_")
+    processed_count = 0
+    
+    for file_path in all_files:
+        filename = os.path.basename(file_path)
+        name_lower = filename.lower()
+        
+        # Define target matching criteria matching user lists
+        is_matched = (
+            name_lower.startswith("insp") or
+            name_lower.startswith("epi_cases") or
+            name_lower.startswith("worldpop_") or
+            name_lower.startswith("osrm_") or
+            name_lower.startswith("cross_border") or
+            name_lower.startswith("flowminder_short") or
+            name_lower.startswith("grid3_healthsites") or
+            name_lower.endswith(".shp")
+        )
+        
+        if not is_matched:
+            continue
             
-            print(f"📦 Processing: {file_path} -> Table: '{table_name}'")
-            
-            # Load CSV
-            df = pd.read_csv(file_path)
-            
-            # 1. Column Casing & Mapping (French -> English standard)
-            df.columns = df.columns.str.lower().str.strip()
-            df = df.rename(columns=COLUMN_TRANSLATIONS)
-            
-            # 2. Normalize Geographic names (drop 'Zone de sante' prefix and normalize accents)
-            zone_cols = [c for c in df.columns if 'zone' in c or 'health_zone' in c]
-            if zone_cols:
-                df[zone_cols[0]] = df[zone_cols[0]].astype(str).str.replace(r"(?i)zone de sant(e|é)\s*", "", regex=True)
-                df[zone_cols[0]] = remove_accents(df[zone_cols[0]])
-            
-            # 3. Clean and sanitize dates (handling brackets like ']' and formatting)
-            if 'date' in df.columns:
-                df['date'] = df['date'].astype(str).str.replace(r'[\[\]\'"\s]', '', regex=True)
-                df['date'] = pd.to_datetime(df['date'], errors='coerce')
-                
-                if zone_cols:
-                    df = df.sort_values(by=[zone_cols[0], 'date'])
-            
-            # 4. Standardize Categorical Column values if bilingual data is present
-            for col in df.columns:
-                if df[col].dtype == 'object' and (not zone_cols or col != zone_cols[0]):
-                    cleaned_series = df[col].astype(str).str.lower().str.strip()
-                    cleaned_series = (cleaned_series.str.normalize('NFKD')
-                                      .str.encode('ascii', errors='ignore')
-                                      .str.decode('utf-8'))
-                    if cleaned_series.isin(STATUS_TRANSLATIONS.keys()).any():
-                        df[col] = cleaned_series.replace(STATUS_TRANSLATIONS).str.title()
+        # Determine table name
+        clean_name = (filename.lower()
+                      .replace(".matrix.csv", "_matrix")
+                      .replace(".csv", "")
+                      .replace(".shp", "_shapefile")
+                      .replace("__", "_")
+                      .replace(".", "_")
+                      .replace("-", "_"))
+        
+        # Skip support files for shapefiles (e.g. .shx, .dbf) since the .shp processor consumes them
+        if any(name_lower.endswith(ext) for ext in [".shx", ".dbf", ".prj", ".cpg"]):
+            continue
 
-            # DB INSERTION: Write only 'insp_sitrep' processed tables
-            df.to_sql(table_name, engine, if_exists='replace', index=False)
-            print(f"✔ '{table_name}' table written/updated in the database.")
-    else:
-        print("❌ Error: No CSV files matching '*insp_sitrep*.csv' found in data_test/")
-
-    print("🎉 Ingestion & Database sync complete!")
+        print(f"📦 Processing: '{filename}' -> DB Table: '{clean_name}'")
+        
+        try:
+            # Route processing based on file type
+            if name_lower.endswith(".shp"):
+                processed_df = process_shapefile(file_path)
+            else:
+                raw_df = pd.read_csv(file_path)
+                processed_df = clean_dataframe(raw_df)
+            
+            # Save to database
+            processed_df.to_sql(clean_name, engine, if_exists='replace', index=False)
+            print(f"✔ Table '{clean_name}' successfully built and sync'd.")
+            processed_count += 1
+            
+        except Exception as e:
+            print(f"❌ Failed to process '{filename}': {e}")
+            
+    print(f"🎉 Complete! {processed_count} targeted tables written to the database.")
 
 if __name__ == "__main__":
     clean_and_sync()
