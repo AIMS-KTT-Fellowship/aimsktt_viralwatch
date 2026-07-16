@@ -42,27 +42,46 @@ def clean_and_sync():
         except Exception as e:
             print(f"⚠️ Warning: Schema reset failed: {e}. Moving to standard table replacements.")
 
-    # --- 2. Zero-Loss Merge of individual INSP sitreps into a single wide CSV ---
+    # --- 2. Zero-Loss Merge of individual INSP sitreps directly into PostgreSQL ---
     data_test_dir = Path("data_test")
     merged_output_path = data_test_dir / "insp_sitrep_merged.csv"
     
     try:
         print("🔗 Merging all individual INSP sitrep CSVs into a single wide table...")
-        join_insp_sitrep_csvs(input_dir=data_test_dir, output_path=merged_output_path)
-        print(f"✔ Wide table successfully compiled at {merged_output_path}")
+        # Create output parent directory if it doesn't exist yet
+        data_test_dir.mkdir(parents=True, exist_ok=True)
+        
+        merged_df = join_insp_sitrep_csvs(input_dir=data_test_dir, output_path=merged_output_path)
+        print(f"✔ Wide table successfully compiled locally at {merged_output_path}")
+        
+        # Clean columns and insert directly here! No relying on file loop!
+        print("🚀 Uploading 'insp_sitrep_merged' directly to DB...")
+        merged_df = clean_dataframe(merged_df)
+        merged_df.columns = [clean_column_name(col) for col in merged_df.columns]
+        
+        merged_df.to_sql(
+            "insp_sitrep_merged", 
+            engine, 
+            if_exists='replace', 
+            index=False,
+            method='multi',
+            chunksize=5000
+        )
+        print("✔ Table 'insp_sitrep_merged' successfully written to Database!")
+        
     except Exception as e:
-        print(f"⚠️ Merge failed: {e}. Individual sitreps will be processed raw instead.")
+        print(f"❌ Critical Merge / Upload failed: {e}")
 
-    # 3. Gather files inside data_test for DB sync
+    # 3. Gather files inside data_test for standard DB sync (skipping any raw/processed INSP files)
     all_files = glob.glob(os.path.join("data_test", "*"))
-    processed_count = 0
+    processed_count = 1  # Starting at 1 because we already did the merged table
     
     for file_path in all_files:
         filename = os.path.basename(file_path)
         name_lower = filename.lower()
         
-        # Skip raw individual sitreps (we already merged them!)
-        if name_lower.startswith("insp_sitrep__") and name_lower != "insp_sitrep_merged.csv":
+        # Skip ALL individual raw sitrep files as well as the merged file (already processed!)
+        if "insp" in name_lower:
             continue
             
         # Skip all shapefiles and spatial helper files completely
@@ -71,7 +90,6 @@ def clean_and_sync():
             
         # Flexible substring matching to ensure target CSVs are processed
         is_matched = (
-            "insp" in name_lower or
             "epi_cases" in name_lower or
             "worldpop" in name_lower or
             "osrm" in name_lower or
@@ -107,7 +125,7 @@ def clean_and_sync():
             # Standardize headers to lower_snake_case
             processed_df.columns = [clean_column_name(col) for col in processed_df.columns]
             
-            # Save normal table to database using optimized batched inserting (Fast Upload)
+            # Save normal table to database using optimized batched inserting
             print(f"🚀 Uploading {len(processed_df)} rows to '{clean_name}'...")
             processed_df.to_sql(
                 clean_name, 
