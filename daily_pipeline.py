@@ -1,7 +1,9 @@
 import os
+import csv
 import glob
 import hashlib
 import re
+from io import StringIO
 from pathlib import Path
 import pandas as pd
 from sqlalchemy import create_engine, text
@@ -19,6 +21,29 @@ else:
     engine = create_engine("sqlite:///data_test/viralwatch.db")
     print("📁 DATABASE_URL not found. Saving locally to data_test/viralwatch.db.")
 
+
+def psql_insert_copy(table, conn, keys, data_iter):
+    """
+    Super-fast PostgreSQL COPY stream handler.
+    Bypasses INSERT statements and uploads directly via an in-memory CSV buffer.
+    """
+    dbapi_conn = conn.connection
+    with dbapi_conn.cursor() as cur:
+        s_buf = StringIO()
+        writer = csv.writer(s_buf)
+        writer.writerows(data_iter)
+        s_buf.seek(0)
+
+        columns = ', '.join(f'"{k}"' for k in keys)
+        if table.schema:
+            table_name = f"{table.schema}.{table.name}"
+        else:
+            table_name = table.name
+
+        sql = f"COPY {table_name} ({columns}) FROM STDIN WITH CSV FREEZE"
+        cur.copy_expert(sql=sql, file=s_buf)
+
+
 def clean_column_name(col):
     """
     Standardizes column headers globally to lowercase separated by single underscores.
@@ -27,6 +52,7 @@ def clean_column_name(col):
     c = re.sub(r'[^a-z0-9_]', '_', c)
     c = re.sub(r'_+', '_', c)
     return c.strip('_')
+
 
 def clean_and_sync():
     print("🔥 Starting complete database wipe-and-rebuild cycle...")
@@ -65,7 +91,7 @@ def clean_and_sync():
         if name_lower.startswith("insp_sitrep__") and name_lower != "insp_sitrep_merged.csv":
             continue
             
-        # Flexible substring matching to ensure no file is skipped due to underscores or capitalization
+        # Flexible substring matching to ensure no file is skipped
         is_matched = (
             "insp" in name_lower or
             "epi_cases" in name_lower or
@@ -112,16 +138,27 @@ def clean_and_sync():
             # Standardize headers to lower_snake_case
             processed_df.columns = [clean_column_name(col) for col in processed_df.columns]
             
-            # Save normal table to database using optimized batched inserting (Fast Upload)
-            print(f"🚀 Uploading {len(processed_df)} rows to '{clean_name}'...")
-            processed_df.to_sql(
-                clean_name, 
-                engine, 
-                if_exists='replace', 
-                index=False,
-                method='multi',
-                chunksize=5000
-            )
+            # Save normal table to database using optimized psql bulk COPY
+            print(f"🚀 Streaming {len(processed_df)} rows to '{clean_name}' using fast COPY...")
+            
+            if DATABASE_URL:
+                # Use lightning-fast COPY for PostgreSQL
+                processed_df.to_sql(
+                    clean_name, 
+                    engine, 
+                    if_exists='replace', 
+                    index=False,
+                    method=psql_insert_copy
+                )
+            else:
+                # Fallback for local SQLite tests
+                processed_df.to_sql(
+                    clean_name, 
+                    engine, 
+                    if_exists='replace', 
+                    index=False
+                )
+                
             print(f"✔ Table '{clean_name}' completely replaced.")
             processed_count += 1
             
