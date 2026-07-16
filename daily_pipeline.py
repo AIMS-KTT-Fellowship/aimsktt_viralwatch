@@ -194,10 +194,21 @@ def clean_and_sync():
         
         try:
             raw_df = pd.read_csv(file_path)
+            
+            # --- FIX FOR OSRM INDEX LOSS ---
+            # If the first column was blank in the CSV, Pandas read it as the index.
+            # We must restore it as a named data column to prevent column dropping.
+            if raw_df.index.name is not None or (raw_df.index.name is None and not isinstance(raw_df.index, pd.RangeIndex)):
+                raw_df = raw_df.reset_index()
+                # If the restored column has a default pandas name, rename it to 'nom'
+                if raw_df.columns[0] in ['index', 'Unnamed: 0', 'unnamed:_0', '']:
+                    raw_df.rename(columns={raw_df.columns[0]: 'nom'}, inplace=True)
+            # --------------------------------
+            
             processed_df = clean_dataframe(raw_df)
             processed_df.columns = [clean_column_name(col) for col in processed_df.columns]
             
-            # Intercept standard columns to match 'nom' first too if applicable
+            # Intercept standard columns to match 'nom' first
             if 'health_zone' in processed_df.columns:
                 processed_df = processed_df.rename(columns={'health_zone': 'nom'})
                 
