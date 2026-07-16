@@ -29,6 +29,25 @@ STATUS_TRANSLATIONS = {
 DROP_SUFFIXES = ("__static", ".matrix")
 KEEP_FLOWMINDER_PREFIX = "flowminder_short_trips__"
 
+# --- ML Step 1 & 2 Config ---
+COLLINEAR_DROP_COLS = [
+    "total_poe_hand_washing", "total_poe_passed", "total_poe_sanitised",
+    "total_poe_refused_hand_washing",
+    "flowminder_short_trips__outflow_20260430",
+    "flowminder_short_trips__outflow_20260507",
+    "flowminder_short_trips__outflow_20260514",
+    "flowminder_short_trips__outflow_20260521",
+    "flowminder_short_trips__ituri_subscriber_days_prior_20260503",
+    "flowminder_short_trips__nk_subscriber_days_prior_20260503",
+]
+NATIONAL_PREFIX = "national_"
+HIGH_MISSING_THRESHOLD = 0.70
+TARGET_COL = "new_suspected_cases"
+DROP_SECONDARY_COLS = [
+    "new_contacts_listed", "cumulative_contacts_traced",
+    "cumulative_confirmed_deaths", "new_suspected_deaths",
+]
+
 
 def remove_accents(series: pd.Series) -> pd.Series:
     """Standardizes text by stripping French accents and title-casing names."""
@@ -279,3 +298,59 @@ def merge_worldpop(pop_count_path: Path, pop_density_path: Path, out_path: Path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     merged.to_csv(out_path, index=False)
     return merged
+
+
+def create_training_table(sitrep_path: Path, osrm_path: Path, flow_path: Path, worldpop_path: Path, out_path: Path) -> pd.DataFrame:
+    """Left-joins cleaned data features on sitrep's (nom, date) index anchor."""
+    sitrep = pd.read_csv(sitrep_path, parse_dates=["date"])
+    osrm = pd.read_csv(osrm_path, parse_dates=["date"])
+    flow = pd.read_csv(flow_path)
+    wp = pd.read_csv(worldpop_path)
+
+    df = sitrep.merge(osrm, on=["nom", "date"], how="left")
+    df = df.merge(flow, on="nom", how="left")
+    df = df.merge(wp, on="nom", how="left")
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(out_path, index=False)
+    return df
+
+
+def trim_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Trims collinear/redundant and national summary features."""
+    national_cols = [c for c in df.columns if c.startswith(NATIONAL_PREFIX)]
+    all_drop = COLLINEAR_DROP_COLS + national_cols
+
+    missing_from_df = [c for c in all_drop if c not in df.columns]
+    if missing_from_df:
+        raise ValueError(f"Expected columns not found: {missing_from_df}")
+
+    return df.drop(columns=all_drop)
+
+
+def handle_missingness(df: pd.DataFrame) -> pd.DataFrame:
+    """Implements missingness cleanup, forward-fills and specific-imputation strategies."""
+    # 1. Drop highly sparse columns
+    high_missing = df.isna().mean() > HIGH_MISSING_THRESHOLD
+    drop_cols = high_missing[high_missing].index.tolist()
+    df = df.drop(columns=drop_cols)
+
+    # 2. Forward fill cumulative variables
+    cum_cols = [c for c in df.columns if c.startswith("cumulative_")]
+    df = df.sort_values(["nom", "date"])
+    df[cum_cols] = df.groupby("nom")[cum_cols].ffill()
+
+    # 3. Drop rows missing the target variable
+    df = df[df[TARGET_COL].notna()].copy()
+
+    # 4. Drop minor operational variables
+    present_secondary = [c for c in DROP_SECONDARY_COLS if c in df.columns]
+    df = df.drop(columns=present_secondary)
+
+    # 5. Impute Flowminder signal loss with 0
+    flow_cols = [c for c in df.columns if c.startswith(KEEP_FLOWMINDER_PREFIX)]
+    df[flow_cols] = df[flow_cols].fillna(0)
+
+    # 6. Drop remaining NaN rows
+    df = df.dropna()
+    return df.sort_values("date", ascending=True)
