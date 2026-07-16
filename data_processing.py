@@ -79,7 +79,7 @@ def clean_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 def join_insp_sitrep_csvs(input_dir: Path | str, output_path: Path | str) -> pd.DataFrame:
     """
     Join ALL INSP SitRep CSV files on (nom, date) into a single wide table.
-    Gracefully handles merging without losing 'nd' values by dynamically renaming them.
+    Ensures 'nom' is strictly the first column.
     """
     input_dir = Path(input_dir)
     output_path = Path(output_path)
@@ -152,6 +152,10 @@ def join_insp_sitrep_csvs(input_dir: Path | str, output_path: Path | str) -> pd.
             suffixes=('', f'_dup_{i}')
         )
 
+    # Force 'nom' to be the first column
+    cols = ['nom'] + [col for col in merged.columns if col != 'nom']
+    merged = merged[cols]
+
     try:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         merged.to_csv(output_path, index=False)
@@ -191,7 +195,7 @@ def _read_flowminder_frame(csv_path: Path) -> pd.DataFrame | None:
 
 
 def join_flowminder_csvs(input_dir: Path | str, output_path: Path | str) -> pd.DataFrame:
-    """Join Flowminder files on geography key ('nom') to build a wide table."""
+    """Join Flowminder files on geography key ('nom') to build a wide table with 'nom' first."""
     input_dir = Path(input_dir)
     output_path = Path(output_path)
 
@@ -222,6 +226,10 @@ def join_flowminder_csvs(input_dir: Path | str, output_path: Path | str) -> pd.D
     for frame in frames[1:]:
         merged = pd.merge(merged, frame, on=join_col, how="outer")
 
+    # Force 'nom' to be the first column
+    cols = ['nom'] + [col for col in merged.columns if col != 'nom']
+    merged = merged[cols]
+
     output_path.parent.mkdir(parents=True, exist_ok=True)
     merged.to_csv(output_path, index=False)
     return merged
@@ -230,7 +238,7 @@ def join_flowminder_csvs(input_dir: Path | str, output_path: Path | str) -> pd.D
 def join_worldpop_csvs(input_dir: Path | str, output_path: Path | str) -> pd.DataFrame:
     """
     Finds WorldPop files (by looking for 'count' and 'density' in the filenames)
-    and merges them into a single wide table (nom, count, density).
+    and merges them into a single wide table. Force-orders 'nom' as the first column.
     """
     input_dir = Path(input_dir)
     output_path = Path(output_path)
@@ -293,7 +301,7 @@ def join_worldpop_csvs(input_dir: Path | str, output_path: Path | str) -> pd.Dat
     df_count = _extract_metric(count_file, "count") if count_file else pd.DataFrame(columns=["nom", "count"])
     df_density = _extract_metric(density_file, "density") if density_file else pd.DataFrame(columns=["nom", "density"])
 
-    # Perform outer merge to keep all unique zones with missing (null) values intact
+    # Perform outer merge
     if not df_count.empty and not df_density.empty:
         merged = pd.merge(df_count, df_density, on="nom", how="outer")
     elif not df_count.empty:
@@ -302,6 +310,10 @@ def join_worldpop_csvs(input_dir: Path | str, output_path: Path | str) -> pd.Dat
     else:
         merged = df_density
         merged["count"] = np.nan
+
+    # Force 'nom' to be the first column
+    cols = ['nom'] + [col for col in merged.columns if col != 'nom']
+    merged = merged[cols]
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     merged.to_csv(output_path, index=False)
