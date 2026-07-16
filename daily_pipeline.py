@@ -7,7 +7,7 @@ import pandas as pd
 from sqlalchemy import create_engine, text
 
 # Safe explicit imports
-from data_processing import clean_dataframe, join_insp_sitrep_csvs, join_flowminder_csvs, join_worldpop_csvs
+from data_processing import clean_dataframe, join_insp_sitrep_csvs, join_flowminder_csvs, join_worldpop_csvs, force_nom_first
 
 # Fetch Connection String from Environment
 DATABASE_URL = os.environ.get("DATABASE_URL")
@@ -62,14 +62,8 @@ def clean_and_sync():
             merged_df = clean_dataframe(merged_df)
             merged_df.columns = [clean_column_name(col) for col in merged_df.columns]
             
-            # Intercept automated 'health_zone' translation back to exact 'nom' requirement
-            if 'health_zone' in merged_df.columns:
-                merged_df = merged_df.rename(columns={'health_zone': 'nom'})
-            
-            # Force 'nom' to be the first column in the DB output
-            if 'nom' in merged_df.columns:
-                cols = ['nom'] + [col for col in merged_df.columns if col != 'nom']
-                merged_df = merged_df[cols]
+            # FORCE 'nom' directly to position 0 before sending to the DB
+            merged_df = force_nom_first(merged_df)
             
             merged_df.to_sql(
                 "insp_sitrep_merged", 
@@ -79,7 +73,7 @@ def clean_and_sync():
                 method='multi',
                 chunksize=5000
             )
-            print("✔ Table 'insp_sitrep_merged' successfully written to Database!")
+            print("✔ Table 'insp_sitrep_merged' successfully written with 'nom' as first column!")
         else:
             print("⚠️ No individual INSP files found to merge.")
     except Exception as e:
@@ -97,14 +91,8 @@ def clean_and_sync():
             flow_df = clean_dataframe(flow_df)
             flow_df.columns = [clean_column_name(col) for col in flow_df.columns]
             
-            # Intercept automated 'health_zone' translation back to exact 'nom' requirement
-            if 'health_zone' in flow_df.columns:
-                flow_df = flow_df.rename(columns={'health_zone': 'nom'})
-            
-            # Force 'nom' to be the first column in the DB output
-            if 'nom' in flow_df.columns:
-                cols = ['nom'] + [col for col in flow_df.columns if col != 'nom']
-                flow_df = flow_df[cols]
+            # FORCE 'nom' directly to position 0 before sending to the DB
+            flow_df = force_nom_first(flow_df)
             
             flow_df.to_sql(
                 "flowminder_merged", 
@@ -114,7 +102,7 @@ def clean_and_sync():
                 method='multi',
                 chunksize=5000
             )
-            print("✔ Table 'flowminder_merged' successfully written to Database!")
+            print("✔ Table 'flowminder_merged' successfully written with 'nom' as first column!")
         else:
             print("⚠️ No Flowminder files found to merge.")
     except Exception as e:
@@ -132,14 +120,8 @@ def clean_and_sync():
             wp_df = clean_dataframe(wp_df)
             wp_df.columns = [clean_column_name(col) for col in wp_df.columns]
             
-            # Intercept automated 'health_zone' translation back to exact 'nom' requirement
-            if 'health_zone' in wp_df.columns:
-                wp_df = wp_df.rename(columns={'health_zone': 'nom'})
-            
-            # Force 'nom' to be the first column in the DB output
-            if 'nom' in wp_df.columns:
-                cols = ['nom'] + [col for col in wp_df.columns if col != 'nom']
-                wp_df = wp_df[cols]
+            # FORCE 'nom' directly to position 0 before sending to the DB
+            wp_df = force_nom_first(wp_df)
             
             wp_df.to_sql(
                 "worldpop_merged", 
@@ -149,7 +131,7 @@ def clean_and_sync():
                 method='multi',
                 chunksize=5000
             )
-            print("✔ Table 'worldpop_merged' successfully written to Database!")
+            print("✔ Table 'worldpop_merged' successfully written with 'nom' as first column!")
         else:
             print("⚠️ No WorldPop files found to merge.")
     except Exception as e:
@@ -196,11 +178,8 @@ def clean_and_sync():
             raw_df = pd.read_csv(file_path)
             
             # --- FIX FOR OSRM INDEX LOSS ---
-            # If the first column was blank in the CSV, Pandas read it as the index.
-            # We must restore it as a named data column to prevent column dropping.
             if raw_df.index.name is not None or (raw_df.index.name is None and not isinstance(raw_df.index, pd.RangeIndex)):
                 raw_df = raw_df.reset_index()
-                # If the restored column has a default pandas name, rename it to 'nom'
                 if raw_df.columns[0] in ['index', 'Unnamed: 0', 'unnamed:_0', '']:
                     raw_df.rename(columns={raw_df.columns[0]: 'nom'}, inplace=True)
             # --------------------------------
@@ -208,13 +187,8 @@ def clean_and_sync():
             processed_df = clean_dataframe(raw_df)
             processed_df.columns = [clean_column_name(col) for col in processed_df.columns]
             
-            # Intercept standard columns to match 'nom' first
-            if 'health_zone' in processed_df.columns:
-                processed_df = processed_df.rename(columns={'health_zone': 'nom'})
-                
-            if 'nom' in processed_df.columns:
-                cols = ['nom'] + [col for col in processed_df.columns if col != 'nom']
-                processed_df = processed_df[cols]
+            # FORCE 'nom' directly to position 0 before sending to the DB
+            processed_df = force_nom_first(processed_df)
             
             processed_df.to_sql(
                 clean_name, 
@@ -224,13 +198,13 @@ def clean_and_sync():
                 method='multi',
                 chunksize=5000
             )
-            print(f"✔ Table '{clean_name}' completely replaced.")
+            print(f"✔ Table '{clean_name}' completely replaced with 'nom' as first column.")
             processed_count += 1
             
         except Exception as e:
             print(f"❌ Failed to process '{filename}': {e}")
             
-    print(f"🎉 Complete! All database configurations synchronized safely.")
+    print(f"🎉 Complete! All database configurations synchronized safely with 'nom' in column 1.")
 
 if __name__ == "__main__":
     clean_and_sync()
