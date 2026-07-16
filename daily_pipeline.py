@@ -1,27 +1,33 @@
 import os
-import glob
-import hashlib
 import re
 from pathlib import Path
 import pandas as pd
 from sqlalchemy import create_engine, text
 
 from data_processing import (
-    clean_dataframe, 
-    join_insp_sitrep_csvs, 
-    join_flowminder_csvs, 
-    join_worldpop_csvs, 
-    compute_osrm_nearest_active
+    clean_dataframe,
+    compute_osrm_nearest_active,
+    clean_and_merge_flowminder,
+    merge_worldpop
 )
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
-
 if DATABASE_URL:
     if DATABASE_URL.startswith("postgres://"):
         DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
     engine = create_engine(DATABASE_URL)
 else:
     engine = create_engine("sqlite:///viralwatch.db")
+
+
+# --- Raw Github Remote Data URLs ---
+RAW_BASE_URL = "https://raw.githubusercontent.com/INRB-UMIE/BDBV2026-Data/main"
+OSRM_URL = f"{RAW_BASE_URL}/build/long/osrm__travel_time.csv"
+ALIASES_URL = f"{RAW_BASE_URL}/data/aliases.csv"
+FLOWMINDER_URL = f"{RAW_BASE_URL}/build/long/flowminder_merged.csv"
+WP_COUNT_URL = f"{RAW_BASE_URL}/build/long/worldpop__pop_count.csv"
+WP_DENSITY_URL = f"{RAW_BASE_URL}/build/long/worldpop__pop_density.csv"
+SITREP_MERGED_URL = f"{RAW_BASE_URL}/build/long/insp_sitrep_merged.csv" # Standard location
 
 
 def clean_column_name(col):
@@ -31,20 +37,13 @@ def clean_column_name(col):
     return c.strip('_')
 
 
-def find_path_fallback(target_filename: str, preferred_path: Path) -> Path:
-    if preferred_path.exists():
-        return preferred_path
-    
+def run_pipeline():
+    # Setup the local Output Directory
     workspace_root = Path(".").resolve()
-    for parent in [workspace_root] + list(workspace_root.parents):
-        for p in parent.rglob(target_filename):
-            if p.is_file():
-                return p
-                
-    return preferred_path
+    output_dir = workspace_root / "output"
+    output_dir.mkdir(parents=True, exist_ok=True)
 
-
-def clean_and_sync():
+    # Clean DB Schema on Startup
     if DATABASE_URL:
         try:
             with engine.begin() as conn:
@@ -54,67 +53,75 @@ def clean_and_sync():
         except Exception:
             pass
 
-    # Remote OSRM RAW URL (Direct web load, no Git LFS needed)
-    OSRM_PATH = "https://raw.githubusercontent.com/INRB-UMIE/BDBV2026-Data/main/build/matrix/osrm__travel_time__static.matrix.csv"
-    
-    workspace_root = Path(".").resolve()
-    
-    # Establish data_test as the directory for all local read/write operations
-    data_dir = workspace_root / "data_test"
-    if not data_dir.exists():
-        data_dir.mkdir(parents=True, exist_ok=True)
-
-    # Looking for input in data_test/ and saving output features directly inside data_test/
-    SITREP_PATH = find_path_fallback("insp_sitrep_training_window.csv", data_dir / "insp_sitrep_training_window.csv")
-    OUT_PATH = data_dir / "osrm_nearest_active_feature.csv"
-
-    # --- 1. Custom OSRM Calculation Feature Generation & DB Upload ---
+    # --- 1. Clean INSP Sitreps & Filter Training Window ---
+    print("⏳ Processing INSP Sitrep datasets...")
     try:
-        if SITREP_PATH.exists():
-            osrm_df = compute_osrm_nearest_active(OSRM_PATH, SITREP_PATH, OUT_PATH)
-            
-            # Post-Process & Normalize Columns
-            osrm_df = clean_dataframe(osrm_df)
-            osrm_df.columns = [clean_column_name(col) for col in osrm_df.columns]
-            
-            # Direct Write straight to Database
-            osrm_df.to_sql("osrm_nearest_active_feature", engine, if_exists='replace', index=False)
+        raw_sitrep = pd.read_csv(SITREP_MERGED_URL)
+        
+        # Clean Datatypes / Replace "ND"
+        for col in raw_sitrep.columns:
+            if col not in ["nom", "date"]:
+                raw_sitrep[col] = raw_sitrep[col].replace("ND", pd.NA)
+                raw_sitrep[col] = pd.to_numeric(raw_sitrep[col], errors="coerce")
+
+        # Split and save clean zones
+        zone_rows = raw_sitrep[raw_sitrep["nom"].notna()].copy()
+        zone_rows = zone_rows[zone_rows["date"].notna()].copy()
+        zone_rows.to_csv(output_dir / "insp_sitrep_zone_level_clean.csv", index=False)
+
+        # Build Training Window (2026-05-14 to 2026-05-29)
+        training_df = zone_rows[(zone_rows["date"] >= "2026-05-14") & (zone_rows["date"] <= "2026-05-29")].copy()
+        training_path = output_dir / "insp_sitrep_training_window.csv"
+        training_df.to_csv(training_path, index=False)
+        
+        # Upload clean training set
+        training_db = clean_dataframe(training_df)
+        training_db.columns = [clean_column_name(col) for col in training_db.columns]
+        training_db.to_sql("insp_sitrep_training_window", engine, if_exists="replace", index=False)
+        print("✅ INSP Sitrep Complete!")
     except Exception as e:
-        print(f"❌ OSRM upload failed: {e}")
+        print(f"❌ INSP Sitrep failed: {e}")
 
-    # --- 2. INSP Merge ---
+    # --- 2. Calculate OSRM Nearest Active Matrix ---
+    print("⏳ Calculating nearest active-case zones using OSRM travel matrices...")
     try:
-        if len(list(data_dir.glob("insp_sitrep*.csv"))) > 0:
-            merged_df = join_insp_sitrep_csvs(input_dir=data_dir, output_path=data_dir / "insp_sitrep_merged.csv")
-            merged_df = clean_dataframe(merged_df)
-            merged_df.columns = [clean_column_name(col) for col in merged_df.columns]
+        sitrep_path = output_dir / "insp_sitrep_training_window.csv"
+        out_osrm_path = output_dir / "osrm_nearest_active_feature.csv"
+        
+        if sitrep_path.exists():
+            osrm_df = compute_osrm_nearest_active(OSRM_URL, ALIASES_URL, sitrep_path, out_osrm_path)
             
-            merged_df.to_sql("insp_sitrep_merged", engine, if_exists='replace', index=False)
+            osrm_db = clean_dataframe(osrm_df)
+            osrm_db.columns = [clean_column_name(col) for col in osrm_db.columns]
+            osrm_db.to_sql("osrm_nearest_active_feature", engine, if_exists="replace", index=False)
+            print("✅ OSRM calculation Complete!")
     except Exception as e:
-        print(f"❌ INSP upload failed: {e}")
+        print(f"❌ OSRM Matrix logic failed: {e}")
 
-    # --- 3. Flowminder ---
+    # --- 3. Clean and Merge Flowminder ---
+    print("⏳ Cleaning Flowminder datasets...")
     try:
-        if len(list(data_dir.glob("flowminder*.csv"))) > 0:
-            flow_df = join_flowminder_csvs(input_dir=data_dir, output_path=data_dir / "flowminder_merged.csv")
-            flow_df = clean_dataframe(flow_df)
-            flow_df.columns = [clean_column_name(col) for col in flow_df.columns]
-            
-            flow_df.to_sql("flowminder_merged", engine, if_exists='replace', index=False)
+        flow_df = clean_and_merge_flowminder(FLOWMINDER_URL, output_dir / "flowminder_clean.csv")
+        
+        flow_db = clean_dataframe(flow_df)
+        flow_db.columns = [clean_column_name(col) for col in flow_db.columns]
+        flow_db.to_sql("flowminder_clean", engine, if_exists="replace", index=False)
+        print("✅ Flowminder Merging Complete!")
     except Exception as e:
-        print(f"❌ Flowminder upload failed: {e}")
+        print(f"❌ Flowminder processing failed: {e}")
 
-    # --- 4. WorldPop ---
+    # --- 4. Merge WorldPop ---
+    print("⏳ Compiling WorldPop count and density parameters...")
     try:
-        if len(list(data_dir.glob("*worldpop*.csv"))) > 0:
-            wp_df = join_worldpop_csvs(input_dir=data_dir, output_path=data_dir / "worldpop_merged.csv")
-            wp_df = clean_dataframe(wp_df)
-            wp_df.columns = [clean_column_name(col) for col in wp_df.columns]
-
-            wp_df.to_sql("worldpop_merged", engine, if_exists='replace', index=False)
-    except Exception as err:
-        print(f"❌ WorldPop upload failed: {err}")
+        wp_df = merge_worldpop(WP_COUNT_URL, WP_DENSITY_URL, output_dir / "worldpop_merged.csv")
+        
+        wp_db = clean_dataframe(wp_df)
+        wp_db.columns = [clean_column_name(col) for col in wp_db.columns]
+        wp_db.to_sql("worldpop_merged", engine, if_exists="replace", index=False)
+        print("✅ WorldPop Merging Complete!")
+    except Exception as e:
+        print(f"❌ Worldpop processing failed: {e}")
 
 
 if __name__ == "__main__":
-    clean_and_sync()
+    run_pipeline()
