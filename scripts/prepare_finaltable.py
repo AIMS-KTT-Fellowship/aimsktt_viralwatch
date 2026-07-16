@@ -135,7 +135,7 @@ def main():
 
     df = trim_features(df)
     df = handle_missingness(df)
-
+    df = df.sort_values("date", ascending=True) 
     df.to_csv(OUT_PATH, index=False)
     print(f"\nSaved: {OUT_PATH}")
     print("final shape:", df.shape)
