@@ -79,7 +79,7 @@ def clean_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     
     if 'date' in df.columns:
         df['date'] = df['date'].astype(str).str.replace(r'[\[\]\'"\s]', '', regex=True)
-        df['date'] = pd.to_datetime(df['date'], errors='coerce')
+        df['date'] = pd.to_datetime(df['date'], format='%Y-%m-%d', errors='coerce')
         if zone_cols:
             df = df.sort_values(by=[zone_cols[0], 'date'])
             
@@ -222,47 +222,98 @@ def join_flowminder_csvs(input_dir: Path | str, output_path: Path | str) -> pd.D
 
 
 def load_fixed_matrix(osrm_path: Path, aliases_path: Path) -> pd.DataFrame:
-    """Loads OSRM Matrix, applies positional diag-0 validation and resolves aliases."""
+    """Loads OSRM wide matrix, normalizes layout, maps aliases, and validates self-distance diagonal."""
+    # Read matrix while forcing the first column (health zones) to act as row labels (index)
     df = pd.read_csv(osrm_path, index_col=0)
-    row_noms = df["nom"].tolist()
-    dest_cols = [c for c in df.columns if c != "nom"]
     
-    diag = pd.Series([df.loc[df.index[i], dest_cols[i]] for i in range(len(row_noms))])
+    # Standardize string formatting
+    def clean_name(val):
+        return re.sub(r"[\[\]'\" ]", "", str(val)).strip().title()
+
+    df.index = [clean_name(idx) for idx in df.index]
+    df.columns = [clean_name(col) for col in df.columns]
+
+    # Validate distance self-identity (diagonal of static travel matrix must be 0)
+    diag = pd.Series([df.iloc[i, i] for i in range(min(df.shape))])
     if not (diag == 0).all():
          raise ValueError("Self-distance is not 0 for every zone! Positional columns alignment broken.")
 
-    df.columns = ["nom"] + row_noms
-    
+    # Apply health zone aliases/canonical names
     try:
         aliases = pd.read_csv(aliases_path)
-        alias_map = dict(zip(aliases["observed_name"], aliases["canonical_nom"]))
-        df["nom"] = df["nom"].replace(alias_map)
-        df.columns = ["nom"] + [alias_map.get(c, c) for c in df.columns[1:]]
+        aliases.columns = [c.lower().strip() for c in aliases.columns]
+        
+        alias_col = 'observed_name' if 'observed_name' in aliases.columns else aliases.columns[0]
+        standard_col = 'canonical_nom' if 'canonical_nom' in aliases.columns else aliases.columns[1]
+
+        alias_map = dict(zip(
+            aliases[alias_col].apply(clean_name),
+            aliases[standard_col].apply(clean_name)
+        ))
+        
+        # Map indices and column elements
+        df.index = df.index.map(lambda x: alias_map.get(x, x))
+        df.columns = df.columns.map(lambda x: alias_map.get(x, x))
+        
+        # Deduplicate indices or columns if alias conversions overlap
+        df = df.loc[~df.index.duplicated(keep='first')]
+        df = df.loc[:, ~df.columns.duplicated(keep='first')]
     except Exception as e:
         print(f"⚠️ Alias resolution skipped or failed: {e}")
 
-    return df.set_index("nom")
+    df.index.name = "nom"
+    return df
 
 
 def compute_osrm_nearest_active(osrm_path: Path, aliases_path: Path, sitrep_path: Path, out_path: Path) -> pd.DataFrame:
     """Calculates travel time from every zone to its nearest active-case counterpart."""
+    # 1. Load localized, sanitized travel matrix 
     matrix = load_fixed_matrix(osrm_path, aliases_path)
+    
+    # 2. Load compiled sitreps & enforce strict datetime formats (avoiding warning parser fallbacks)
     sitrep = pd.read_csv(sitrep_path)
-    sitrep["date"] = pd.to_datetime(sitrep["date"])
+    
+    # Safely clean up date strings prior to parser call
+    cleaned_dates = sitrep["date"].astype(str).str.replace(r"[\[\]'\" ]", "", regex=True)
+    sitrep["date"] = pd.to_datetime(cleaned_dates, format="%Y-%m-%d", errors="coerce")
+    sitrep = sitrep.dropna(subset=["date"])
 
-    active_by_date = (
-        sitrep[sitrep["cumulative_suspected_cases"] > 0]
-        .groupby("date")["nom"].apply(list)
-    )
+    def clean_name(val):
+        return re.sub(r"[\[\]'\" ]", "", str(val)).strip().title()
+    sitrep["nom"] = sitrep["nom"].apply(clean_name)
+
+    # 3. Vectorized active-zone calculation
+    matrix_zones = set(matrix.columns)
+    
+    # Identify entries where an outbreak is present AND the zone matches a known matrix entry
+    active_cases = sitrep[(sitrep["cumulative_suspected_cases"] > 0) & (sitrep["nom"].isin(matrix_zones))]
+    
+    if active_cases.empty:
+        print("⚠️ No active cases found matching travel matrix entries. Creating empty index template.")
+        result = pd.DataFrame(columns=["nom", "date", "min_minutes_to_active_zone"])
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        result.to_csv(out_path, index=False)
+        return result
+
+    # Group zones having active clusters together chronologically
+    active_by_date = active_cases.groupby("date")["nom"].unique()
 
     records = []
+    # Loop across active dates (vastly faster than row-by-row sitrep evaluation)
     for date, active_zones in active_by_date.items():
-        valid_active = [z for z in active_zones if z in matrix.columns]
-        if not valid_active:
-            continue
-        min_time = matrix[valid_active].min(axis=1)
+        # Subset matrix columns to only include active zones
+        sub_matrix = matrix[list(active_zones)]
+        # Row-wise minimum yields distance from all known locations to closest active zone
+        min_time = sub_matrix.min(axis=1)
+        
+        # Unroll results into flat records
+        date_str = date.strftime("%Y-%m-%d")
         for zone, t in min_time.items():
-            records.append({"nom": zone, "date": date, "min_minutes_to_active_zone": t})
+            records.append({
+                "nom": zone,
+                "date": date_str,
+                "min_minutes_to_active_zone": t
+            })
 
     result = pd.DataFrame(records)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -311,7 +362,6 @@ def create_training_table(sitrep_path: Path, osrm_path: Path, flow_path: Path, w
     df = df.merge(flow, on="nom", how="left")
     df = df.merge(wp, on="nom", how="left")
 
-    # Force "nom" (health zone) and "date" to be the first two columns
     first_cols = ["nom", "date"]
     remaining_cols = [col for col in df.columns if col not in first_cols]
     df = df[first_cols + remaining_cols]
@@ -335,27 +385,21 @@ def trim_features(df: pd.DataFrame) -> pd.DataFrame:
 
 def handle_missingness(df: pd.DataFrame) -> pd.DataFrame:
     """Implements missingness cleanup, forward-fills, and specific-imputation strategies."""
-    # 1. Drop highly sparse columns
     high_missing = df.isna().mean() > HIGH_MISSING_THRESHOLD
     drop_cols = high_missing[high_missing].index.tolist()
     df = df.drop(columns=drop_cols)
 
-    # 2. Forward fill cumulative variables per zone
     cum_cols = [c for c in df.columns if c.startswith("cumulative_")]
     df = df.sort_values(["nom", "date"])
     df[cum_cols] = df.groupby("nom")[cum_cols].ffill()
 
-    # 3. Drop rows missing the target variable
     df = df[df[TARGET_COL].notna()].copy()
 
-    # 4. Drop minor operational variables
     present_secondary = [c for c in DROP_SECONDARY_COLS if c in df.columns]
     df = df.drop(columns=present_secondary)
 
-    # 5. Impute Flowminder signal loss with 0
     flow_cols = [c for c in df.columns if c.startswith(KEEP_FLOWMINDER_PREFIX)]
     df[flow_cols] = df[flow_cols].fillna(0)
 
-    # 6. Drop remaining NaN rows
     df = df.dropna()
     return df.sort_values("date", ascending=True)
