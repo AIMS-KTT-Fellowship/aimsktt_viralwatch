@@ -264,8 +264,7 @@ def run_pipeline():
         
         # A. Execute Processing Flow
         print("   -> Calculating days since initial case benchmark...")
-        # READ WITH HEADER: Eliminates automated dummy integer columns (0..31)
-        raw_cases = pd.read_csv(raw_sitrep_filepath)
+        raw_cases = pd.read_csv(raw_sitrep_filepath, header=None)
         df_days = calculate_days_since_first_case(raw_cases)
         
         print("   -> Parsing spatial density distributions...")
@@ -278,12 +277,17 @@ def run_pipeline():
         df_master = assemble_model_data(df_days, df_pop_density, df_travel_time)
         df_target_features = create_target_variable(df_master)
 
-        # FILTER OUT UNWANTED NUMERIC INDEX COLS
-        # Removes any column that is numeric (e.g. 0, 1) or is a string representation of an integer (e.g. '0')
-        cols_to_keep = [
-            col for col in df_target_features.columns 
-            if not (isinstance(col, int) or str(col).isdigit())
-        ]
+        # --- SLICE STRATEGY: Strip the first 32 raw numeric columns while retaining identifiers ---
+        cols_to_keep = []
+        for col in ["nom", "date"]:
+            if col in df_target_features.columns:
+                cols_to_keep.append(col)
+        
+        # Grab columns starting from index 32 onwards
+        for col in df_target_features.columns[32:]:
+            if col not in cols_to_keep:
+                cols_to_keep.append(col)
+                
         df_target_features = df_target_features[cols_to_keep]
 
         # Save a local CSV mirror backup
@@ -298,12 +302,11 @@ def run_pipeline():
         db_cols_model = ["health_zone", "date"] + [c for c in model_db.columns if c not in ["health_zone", "date"]]
         model_db = model_db[db_cols_model]
 
-        # C. Secure DB Upload (FORCE DROP & RECREATE SCHEMA ON EACH RUN)
-        # This completely drops the old schema, clearing out old unlabelled numeric column traces
+        # C. Secure DB Upload (FORCE COMPLETE REBUILD ON EACH RUN)
         with engine.begin() as conn:
-            print(f"🔄 Rebuilding `{model_table_name}` table to update schema and wipe numeric column traces...")
+            print(f"🔄 Dropping and rebuilding `{model_table_name}` schema to cleanly update structural columns...")
             conn.exec_driver_sql(f"DROP TABLE IF EXISTS {model_table_name} CASCADE;")
-            
+
             print(f"📥 Exporting structured features to `{model_table_name}`...")
             model_db.to_sql(
                 name=model_table_name,
