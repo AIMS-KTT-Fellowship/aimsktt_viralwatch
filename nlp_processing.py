@@ -3,7 +3,6 @@ import json
 import glob
 import pandas as pd
 from pathlib import Path
-from tqdm import tqdm
 
 # --- Path Configurations ---
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../"))
@@ -64,7 +63,8 @@ def run_nlp_pipeline():
     master_records = []
 
     for file_path in files:
-        filename = os.basename(file_path)
+        # FIX: Changed os.basename to os.path.basename to resolve the AttributeError
+        filename = os.path.basename(file_path)
         df = pd.read_csv(file_path)
         
         # Enforce column constraint rules
@@ -89,7 +89,11 @@ def run_nlp_pipeline():
         if valid_df.empty:
             continue
 
-        for idx, row in tqdm(valid_df.iterrows(), total=len(valid_df), desc="Analyzing entries"):
+        total_rows = len(valid_df)
+        for idx, row in valid_df.reset_index(drop=True).iterrows():
+            if idx % 10 == 0:
+                print(f"   -> Processing entry {idx + 1}/{total_rows}...")
+                
             raw_text = str(row[text_col])
             
             # --- Job 1: Zero-Shot Classification ---
