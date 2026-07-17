@@ -142,15 +142,23 @@ def run_pipeline():
         raw_table_name = "training_table_raw"
         final_table_name = "training_table_final"
 
-        # C. Secure DB Upload (SMART TRUNCATE & APPEND BOTH TABLES)
+        # C. Secure DB Upload (FORCE EXACT COLUMN ORDER USING DROP & REPLACE)
         with engine.begin() as conn:
             inspector = inspect(engine)
             
             # --- 1. Handle Raw Table ---
             if inspector.has_table(raw_table_name):
-                print(f"🧹 Truncating existing rows in `{raw_table_name}`...")
-                conn.exec_driver_sql(f"TRUNCATE TABLE {raw_table_name};")
-                if_exists_raw = "append"
+                # Retrieve the current database column order
+                db_columns = [col['name'] for col in inspector.get_columns(raw_table_name)]
+                # Check if "health_zone" and "date" are already the first two columns
+                if db_columns[:2] == ["health_zone", "date"]:
+                    print(f"🧹 Table `{raw_table_name}` has correct column order. Truncating rows...")
+                    conn.exec_driver_sql(f"TRUNCATE TABLE {raw_table_name};")
+                    if_exists_raw = "append"
+                else:
+                    print(f"🔄 Column order mismatch in `{raw_table_name}`. Dropping and recreating table...")
+                    conn.exec_driver_sql(f"DROP TABLE IF EXISTS {raw_table_name} CASCADE;")
+                    if_exists_raw = "replace"
             else:
                 print(f"🆕 `{raw_table_name}` does not exist. Creating it fresh...")
                 if_exists_raw = "replace"
@@ -165,9 +173,17 @@ def run_pipeline():
 
             # --- 2. Handle Final Table ---
             if inspector.has_table(final_table_name):
-                print(f"🧹 Truncating existing rows in `{final_table_name}`...")
-                conn.exec_driver_sql(f"TRUNCATE TABLE {final_table_name};")
-                if_exists_final = "append"
+                # Retrieve the current database column order
+                db_columns = [col['name'] for col in inspector.get_columns(final_table_name)]
+                # Check if "health_zone" and "date" are already the first two columns
+                if db_columns[:2] == ["health_zone", "date"]:
+                    print(f"🧹 Table `{final_table_name}` has correct column order. Truncating rows...")
+                    conn.exec_driver_sql(f"TRUNCATE TABLE {final_table_name};")
+                    if_exists_final = "append"
+                else:
+                    print(f"🔄 Column order mismatch in `{final_table_name}`. Dropping and recreating table...")
+                    conn.exec_driver_sql(f"DROP TABLE IF EXISTS {final_table_name} CASCADE;")
+                    if_exists_final = "replace"
             else:
                 print(f"🆕 `{final_table_name}` does not exist. Creating it fresh...")
                 if_exists_final = "replace"
@@ -180,7 +196,7 @@ def run_pipeline():
                 index=False
             )
             
-        print(f"💾 Successfully synchronized both SQL tables with customized column sequence!")
+        print(f"💾 Successfully synchronized both SQL tables with fixed column sequence!")
         print(f"✅ Success! Active training window contains {len(df_final)} validated data points.")
 
     except Exception as e:
