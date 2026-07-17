@@ -4,6 +4,7 @@ from pathlib import Path
 import pandas as pd
 import numpy as np
 
+# --- Configuration Constants ---
 COLUMN_TRANSLATIONS = {
     "date_notification": "date",
     "date_rapport": "date",
@@ -25,6 +26,28 @@ STATUS_TRANSLATIONS = {
     "suspect": "suspected", "confirme": "confirmed", "decede": "deceased"
 }
 
+DROP_SUFFIXES = ("__static", ".matrix")
+KEEP_FLOWMINDER_PREFIX = "flowminder_short_trips__"
+
+# --- ML Trimming & Missingness Config ---
+COLLINEAR_DROP_COLS = [
+    "total_poe_hand_washing", "total_poe_passed", "total_poe_sanitised",
+    "total_poe_refused_hand_washing",
+    "flowminder_short_trips__outflow_20260430",
+    "flowminder_short_trips__outflow_20260507",
+    "flowminder_short_trips__outflow_20260514",
+    "flowminder_short_trips__outflow_20260521",
+    "flowminder_short_trips__ituri_subscriber_days_prior_20260503",
+    "flowminder_short_trips__nk_subscriber_days_prior_20260503",
+]
+NATIONAL_PREFIX = "national_"
+HIGH_MISSING_THRESHOLD = 0.70
+TARGET_COL = "new_suspected_cases"
+DROP_SECONDARY_COLS = [
+    "new_contacts_listed", "cumulative_contacts_traced",
+    "cumulative_confirmed_deaths", "new_suspected_deaths",
+]
+
 
 def remove_accents(series: pd.Series) -> pd.Series:
     """Standardizes text by stripping French accents and title-casing names."""
@@ -38,6 +61,8 @@ def remove_accents(series: pd.Series) -> pd.Series:
 
 def clean_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     """Applies standard data cleaning and normalization to DataFrames."""
+    if df.empty:
+        return df
     df.columns = df.columns.str.lower().str.strip()
     df = df.rename(columns=COLUMN_TRANSLATIONS)
     
@@ -67,7 +92,7 @@ def clean_dataframe(df: pd.DataFrame) -> pd.DataFrame:
             if cleaned_series.isin(STATUS_TRANSLATIONS.keys()).any():
                 df[col] = cleaned_series.replace(STATUS_TRANSLATIONS).str.title()
                 
-    numeric_candidates = ['confirmed_cases', 'suspected_cases', 'deaths', 'recovered', 'cases', 'value']
+    numeric_candidates = ['confirmed_cases', 'suspected_cases', 'deaths', 'recovered', 'cases', 'value', 'count', 'density']
     for col in df.columns:
         if col in numeric_candidates or df[col].astype(str).str.upper().isin(['ND', 'N/D', 'NULL']).any():
             df[col] = df[col].astype(str).replace(r'(?i)\b(nd|n/d|null|nan)\b', np.nan, regex=True)
@@ -75,13 +100,9 @@ def clean_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 
     return df
 
-def join_insp_sitrep_csvs(input_dir: Path | str, output_path: Path | str) -> pd.DataFrame:
-    """
-    Join all INSP SitRep CSV files on (nom, date) into a wide table.
 
-    Each file contributes one metric column, named after the filename.
-    Missing combinations remain as NaN.
-    """
+def join_insp_sitrep_csvs(input_dir: Path | str, output_path: Path | str) -> pd.DataFrame:
+    """Join all individual INSP SitRep CSV files on (nom, date) into a wide table."""
     input_dir = Path(input_dir)
     output_path = Path(output_path)
 
@@ -164,7 +185,7 @@ def _read_flowminder_frame(csv_path: Path) -> pd.DataFrame | None:
 
 
 def join_flowminder_csvs(input_dir: Path | str, output_path: Path | str) -> pd.DataFrame:
-    """Join Flowminder files on geography key ('nom') to build a wide table with 'nom' first."""
+    """Join individual Flowminder CSVs on geographical key ('nom') into a wide DataFrame."""
     input_dir = Path(input_dir)
     output_path = Path(output_path)
 
@@ -195,97 +216,146 @@ def join_flowminder_csvs(input_dir: Path | str, output_path: Path | str) -> pd.D
     for frame in frames[1:]:
         merged = pd.merge(merged, frame, on=join_col, how="outer")
 
-    # Force 'nom' to be the first column
-    cols = ['nom'] + [col for col in merged.columns if col != 'nom']
-    merged = merged[cols]
-
     output_path.parent.mkdir(parents=True, exist_ok=True)
     merged.to_csv(output_path, index=False)
     return merged
 
 
-def join_worldpop_csvs(input_dir: Path | str, output_path: Path | str) -> pd.DataFrame:
-    """
-    Finds WorldPop files (by looking for 'count' and 'density' in the filenames)
-    and merges them into a single wide table. Force-orders 'nom' as the first column.
-    """
-    input_dir = Path(input_dir)
-    output_path = Path(output_path)
-
-    # Grab all CSV files in the folder
-    all_csvs = list(input_dir.glob("*.csv"))
+def load_fixed_matrix(osrm_path: Path, aliases_path: Path) -> pd.DataFrame:
+    """Loads OSRM Matrix, applies positional diag-0 validation and resolves aliases."""
+    df = pd.read_csv(osrm_path, index_col=0)
+    row_noms = df["nom"].tolist()
+    dest_cols = [c for c in df.columns if c != "nom"]
     
-    count_file = None
-    density_file = None
+    diag = pd.Series([df.loc[df.index[i], dest_cols[i]] for i in range(len(row_noms))])
+    if not (diag == 0).all():
+         raise ValueError("Self-distance is not 0 for every zone! Positional columns alignment broken.")
 
-    # Search explicitly for "count" and "density" in filenames
-    for f in all_csvs:
-        name_lower = f.name.lower()
-        if "density" in name_lower:
-            density_file = f
-        elif "count" in name_lower:
-            count_file = f
-
-    if not count_file and not density_file:
-        raise FileNotFoundError(
-            f"Could not locate WorldPop files in '{input_dir}'. "
-            f"Expected one file with 'count' and one with 'density' in the filename."
-        )
-
-    def _extract_metric(file_path: Path, metric_name: str) -> pd.DataFrame:
-        df = pd.read_csv(file_path)
-        df.columns = df.columns.str.lower().str.strip()
-        
-        # 1. Detect geography column ('nom' or 'zone')
-        geo_col = None
-        for col in df.columns:
-            if any(k in col for k in ["zone", "nom", "health", "sante"]):
-                geo_col = col
-                break
-        if not geo_col:
-            geo_col = df.columns[0]  # Fallback to 1st column
-            
-        # 2. Detect numeric value column
-        val_col = None
-        for col in df.columns:
-            if col != geo_col and any(k in col for k in ["value", "sum", "pop", "count", "density", "mean"]):
-                val_col = col
-                break
-        if not val_col:
-            remaining = [c for c in df.columns if c != geo_col]
-            val_col = remaining[0] if remaining else None
-
-        # 3. Build standardized DataFrame with clean headers
-        if val_col:
-            df_clean = df[[geo_col, val_col]].copy()
-            df_clean.columns = ["nom", metric_name]
-        else:
-            df_clean = df[[geo_col]].copy()
-            df_clean.columns = ["nom"]
-            df_clean[metric_name] = np.nan
-            
-        return df_clean
-
-    # Safely load the datasets
-    df_count = _extract_metric(count_file, "count") if count_file else pd.DataFrame(columns=["nom", "count"])
-    df_density = _extract_metric(density_file, "density") if density_file else pd.DataFrame(columns=["nom", "density"])
-
-    # Perform outer merge
-    if not df_count.empty and not df_density.empty:
-        merged = pd.merge(df_count, df_density, on="nom", how="outer")
-    elif not df_count.empty:
-        merged = df_count
-        merged["density"] = np.nan
-    else:
-        merged = df_density
-        merged["count"] = np.nan
-
-    # Force 'nom' to be the first column
-    cols = ['nom'] + [col for col in merged.columns if col != 'nom']
-    merged = merged[cols]
-
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    merged.to_csv(output_path, index=False)
-    print(f"💾 Merged WorldPop table created successfully at: {output_path}")
+    df.columns = ["nom"] + row_noms
     
+    try:
+        aliases = pd.read_csv(aliases_path)
+        alias_map = dict(zip(aliases["observed_name"], aliases["canonical_nom"]))
+        df["nom"] = df["nom"].replace(alias_map)
+        df.columns = ["nom"] + [alias_map.get(c, c) for c in df.columns[1:]]
+    except Exception as e:
+        print(f"⚠️ Alias resolution skipped or failed: {e}")
+
+    return df.set_index("nom")
+
+
+def compute_osrm_nearest_active(osrm_path: Path, aliases_path: Path, sitrep_path: Path, out_path: Path) -> pd.DataFrame:
+    """Calculates travel time from every zone to its nearest active-case counterpart."""
+    matrix = load_fixed_matrix(osrm_path, aliases_path)
+    sitrep = pd.read_csv(sitrep_path)
+    sitrep["date"] = pd.to_datetime(sitrep["date"])
+
+    active_by_date = (
+        sitrep[sitrep["cumulative_suspected_cases"] > 0]
+        .groupby("date")["nom"].apply(list)
+    )
+
+    records = []
+    for date, active_zones in active_by_date.items():
+        valid_active = [z for z in active_zones if z in matrix.columns]
+        if not valid_active:
+            continue
+        min_time = matrix[valid_active].min(axis=1)
+        for zone, t in min_time.items():
+            records.append({"nom": zone, "date": date, "min_minutes_to_active_zone": t})
+
+    result = pd.DataFrame(records)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    result.to_csv(out_path, index=False)
+    return result
+
+
+def clean_and_merge_flowminder(flow_merged_path: Path, out_path: Path) -> pd.DataFrame:
+    """Cleans Flowminder DataFrame by dropping static duplicated fields."""
+    df = pd.read_csv(flow_merged_path)
+    
+    for col in df.columns:
+        if col != "nom":
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+            
+    keep_cols = ["nom"] + [
+        c for c in df.columns
+        if c.startswith(KEEP_FLOWMINDER_PREFIX) and not c.endswith(DROP_SUFFIXES)
+    ]
+    clean_df = df[keep_cols].copy()
+    
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    clean_df.to_csv(out_path, index=False)
+    return clean_df
+
+
+def merge_worldpop(pop_count_path: Path, pop_density_path: Path, out_path: Path) -> pd.DataFrame:
+    """Merges WorldPop count & density files."""
+    df_count = pd.read_csv(pop_count_path, header=None, names=["nom", "pop_count"], encoding="utf-8-sig")
+    df_density = pd.read_csv(pop_density_path, header=None, names=["nom", "pop_density"], encoding="utf-8-sig")
+    
+    merged = pd.merge(df_count, df_density, on="nom", how="outer")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    merged.to_csv(out_path, index=False)
     return merged
+
+
+def create_training_table(sitrep_path: Path, osrm_path: Path, flow_path: Path, worldpop_path: Path, out_path: Path) -> pd.DataFrame:
+    """Left-joins cleaned data features on sitrep's (nom, date) index anchor."""
+    sitrep = pd.read_csv(sitrep_path, parse_dates=["date"])
+    osrm = pd.read_csv(osrm_path, parse_dates=["date"])
+    flow = pd.read_csv(flow_path)
+    wp = pd.read_csv(worldpop_path)
+
+    df = sitrep.merge(osrm, on=["nom", "date"], how="left")
+    df = df.merge(flow, on="nom", how="left")
+    df = df.merge(wp, on="nom", how="left")
+
+    # Force "nom" (health zone) and "date" to be the first two columns
+    first_cols = ["nom", "date"]
+    remaining_cols = [col for col in df.columns if col not in first_cols]
+    df = df[first_cols + remaining_cols]
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(out_path, index=False)
+    return df
+
+
+def trim_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Trims collinear/redundant and national summary features."""
+    national_cols = [c for c in df.columns if c.startswith(NATIONAL_PREFIX)]
+    all_drop = COLLINEAR_DROP_COLS + national_cols
+
+    missing_from_df = [c for c in all_drop if c not in df.columns]
+    if missing_from_df:
+        raise ValueError(f"Expected columns not found: {missing_from_df}")
+
+    return df.drop(columns=all_drop)
+
+
+def handle_missingness(df: pd.DataFrame) -> pd.DataFrame:
+    """Implements missingness cleanup, forward-fills, and specific-imputation strategies."""
+    # 1. Drop highly sparse columns
+    high_missing = df.isna().mean() > HIGH_MISSING_THRESHOLD
+    drop_cols = high_missing[high_missing].index.tolist()
+    df = df.drop(columns=drop_cols)
+
+    # 2. Forward fill cumulative variables per zone
+    cum_cols = [c for c in df.columns if c.startswith("cumulative_")]
+    df = df.sort_values(["nom", "date"])
+    df[cum_cols] = df.groupby("nom")[cum_cols].ffill()
+
+    # 3. Drop rows missing the target variable
+    df = df[df[TARGET_COL].notna()].copy()
+
+    # 4. Drop minor operational variables
+    present_secondary = [c for c in DROP_SECONDARY_COLS if c in df.columns]
+    df = df.drop(columns=present_secondary)
+
+    # 5. Impute Flowminder signal loss with 0
+    flow_cols = [c for c in df.columns if c.startswith(KEEP_FLOWMINDER_PREFIX)]
+    df[flow_cols] = df[flow_cols].fillna(0)
+
+    # 6. Drop remaining NaN rows
+    df = df.dropna()
+    return df.sort_values("date", ascending=True)
