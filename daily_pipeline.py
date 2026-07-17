@@ -16,11 +16,18 @@ from data_processing import (
     handle_missingness
 )
 
-# --- Database Engine Setup ---
+# --- Database Engine Setup (Aiven Postgres Compatible) ---
 DATABASE_URL = os.environ.get("DATABASE_URL")
 if DATABASE_URL:
+    # Aiven URIs starting with "postgres://" are converted to "postgresql://" for SQLAlchemy
     if DATABASE_URL.startswith("postgres://"):
         DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+    
+    # Force Aiven's mandatory "sslmode=require" configuration if not present
+    if "sslmode=" not in DATABASE_URL:
+        separator = "&" if "?" in DATABASE_URL else "?"
+        DATABASE_URL += f"{separator}sslmode=require"
+        
     engine = create_engine(DATABASE_URL)
 else:
     engine = create_engine("sqlite:///viralwatch.db")
@@ -196,11 +203,121 @@ def run_pipeline():
                 index=False
             )
             
-        print(f"💾 Successfully synchronized both SQL tables with fixed column sequence!")
-        print(f"✅ Success! Active training window contains {len(df_final)} validated data points.")
+        print(f"💾 Successfully synchronized training tables inside the Postgres Database!")
 
     except Exception as e:
         print(f"❌ Generating training data outputs failed: {e}")
+
+    # --- 6. Generate Model Data Table (ML Outbreak Classification Features) ---
+    print("\n⏳ Assembling ML features and classification target variables...")
+    try:
+        from ml_data_processing import (
+            calculate_days_since_first_case,
+            load_population_density,
+            extract_distance_to_epicenter,
+            assemble_model_data,
+            create_target_variable
+        )
+
+        # Dynamic inputs pointing to generated pipeline CSV pathways
+        raw_sitrep_filepath = output_dir / "insp_sitrep_training_window.csv"
+        pop_filepath = BUILD_LONG_DIR / "worldpop__pop_density.csv"
+        matrix_filepath = BUILD_LONG_DIR / "osrm__travel_time.csv"
+        
+        # A. Execute Processing Flow
+        print("   -> Calculating days since initial case benchmark...")
+        raw_cases = pd.read_csv(raw_sitrep_filepath, header=None)
+        df_days = calculate_days_since_first_case(raw_cases)[cite: 1]
+        
+        print("   -> Parsing spatial density distributions...")
+        df_pop_density = load_population_density(pop_filepath)[cite: 2]
+        
+        print("   -> Evaluating travel metrics relative to Bunia epicenter...")
+        df_travel_time = extract_distance_to_epicenter(matrix_filepath, epicenter_name="Bunia")[cite: 2]
+        
+        print("   -> Assembling master model compilation...")
+        df_master = assemble_model_data(df_days, df_pop_density, df_travel_time)[cite: 2]
+        df_target_features = create_target_variable(df_master)[cite: 2]
+
+        # Save a local CSV mirror backup
+        ml_local_backup = output_dir / "model_data_final.csv"
+        df_target_features.to_csv(ml_local_backup, index=False)[cite: 2]
+
+        # B. Prepare for DB Ingestion
+        model_db = df_target_features.copy()
+        model_db.columns = [clean_column_name(c) for c in model_db.columns]
+        
+        # Enforce designated column order: health_zone first, then date
+        db_cols_model = ["health_zone", "date"] + [c for c in model_db.columns if c not in ["health_zone", "date"]]
+        model_db = model_db[db_cols_model]
+        
+        model_table_name = "model_data"
+
+        # C. Secure DB Upload (Smart Check & Replace Schema)
+        with engine.begin() as conn:
+            inspector = inspect(engine)
+            
+            if inspector.has_table(model_table_name):
+                db_columns = [col['name'] for col in inspector.get_columns(model_table_name)]
+                if db_columns[:2] == ["health_zone", "date"]:
+                    print(f"🧹 Table `{model_table_name}` schema matches. Truncating rows...")
+                    conn.exec_driver_sql(f"TRUNCATE TABLE {model_table_name};")
+                    if_exists_model = "append"
+                else:
+                    print(f"🔄 Schema mismatch in `{model_table_name}`. Dropping and rebuilding table...")
+                    conn.exec_driver_sql(f"DROP TABLE IF EXISTS {model_table_name} CASCADE;")
+                    if_exists_model = "replace"
+            else:
+                print(f"🆕 `{model_table_name}` table is missing. Recreating table fresh...")
+                if_exists_model = "replace"
+
+            print(f"📥 Exporting structured features to `{model_table_name}`...")
+            model_db.to_sql(
+                name=model_table_name,
+                con=conn,
+                if_exists=if_exists_model,
+                index=False
+            )
+            
+        print(f"💾 Successfully processed and populated `{model_table_name}` inside the Postgres Database!")
+        
+    except Exception as e:
+        print(f"❌ Failed to construct or ingest features into `{model_table_name}`: {e}")
+
+    # --- 7. Run ML Model and Upload Predictions ---
+    print("\n⏳ Running Machine Learning Model training & forecasting...")
+    try:
+        # Import your model training function here (e.g., from train_model.py)
+        # Assumes a function `generate_forecasts()` exists in `train_model.py`
+        from train_model import generate_forecasts
+        
+        # 1. Generate predictions from the model
+        predictions_df = generate_forecasts(final_table_path) 
+        
+        # 2. Standardize column schema names
+        predictions_df.columns = [clean_column_name(c) for c in predictions_df.columns]
+        
+        # Expected structure: 'health_zone', 'date', 'predicted_cases'
+        predictions_db = predictions_df[["health_zone", "date", "predicted_cases"]].copy()
+        predictions_db["date"] = pd.to_datetime(predictions_db["date"]).dt.date
+        
+        prediction_table_name = "model_predictions"
+
+        # 3. Securely append forecasts to the DB
+        with engine.begin() as conn:
+            print(f"📥 Appending new prediction records to `{prediction_table_name}`...")
+            predictions_db.to_sql(
+                name=prediction_table_name,
+                con=conn,
+                if_exists="append",
+                index=False
+            )
+            
+        print(f"💾 Successfully logged model predictions to `{prediction_table_name}`!")
+        print("🎉 Entire pipeline execution completed from raw ingest to analytical DB predictions!")
+
+    except Exception as e:
+        print(f"❌ Model training or prediction upload failed: {e}")
 
 
 if __name__ == "__main__":
