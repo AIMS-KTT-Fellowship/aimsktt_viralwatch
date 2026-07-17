@@ -3,18 +3,18 @@ import glob
 import pandas as pd
 from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
 from tqdm import tqdm
-from pathlib import Path
 
-PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../"))
-OUTPUT_DIR = os.path.join(PROJECT_ROOT, "output", "nlp", "summarization")
+INPUT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../BDBV2026-Data/data/public_health_response/processed"))
+OUTPUT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../output/nlp/summarization"))
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 print("Loading Summarization model (sshleifer/distilbart-cnn-12-6)...")
+# Bypass pipeline() and load the tokenizer and model directly
 tokenizer = AutoTokenizer.from_pretrained("sshleifer/distilbart-cnn-12-6")
 model = AutoModelForSeq2SeqLM.from_pretrained("sshleifer/distilbart-cnn-12-6")
 
-files = [str(p) for p in Path(PROJECT_ROOT).rglob("*_en__daily.csv")]
+files = glob.glob(os.path.join(INPUT_DIR, "*_en__daily.csv"))
 print(f"Found {len(files)} English files for Summarization processing.")
 
 for file_path in files:
@@ -37,11 +37,17 @@ for file_path in files:
                 max_len = min(60, max(20, int(input_len * 0.6)))
                 min_len = min(10, max_len - 5)
                 
-                # Truncate text to avoid token limits
+                # Truncate text to avoid token limits, generate using model directly
                 inputs = tokenizer(text[:2000], return_tensors="pt", max_length=1024, truncation=True)
-                summary_ids = model.generate(inputs["input_ids"], max_length=max_len, min_length=min_len, num_beams=2, early_stopping=True)
-                summary_text = tokenizer.decode(summary_ids[0], skip_special_tokens=True)
-                return summary_text
+                summary_ids = model.generate(
+                    inputs["input_ids"], 
+                    max_length=max_len, 
+                    min_length=min_len, 
+                    num_beams=2, 
+                    early_stopping=True
+                )
+                return tokenizer.decode(summary_ids[0], skip_special_tokens=True)
+            
             except Exception as e:
                 return f"Error: {str(e)}"
                 
