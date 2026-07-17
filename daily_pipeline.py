@@ -49,8 +49,6 @@ def run_pipeline():
     output_dir = workspace_root / "output"
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Note: Global public schema drops are entirely removed to preserve pre-existing database tables and structures.
-
     # --- 1. Compile INSP Sitreps ---
     print("⏳ Compiling INSP Sitreps...")
     try:
@@ -110,17 +108,17 @@ def run_pipeline():
         flow_p = output_dir / "flowminder_clean.csv"
         wp_p = output_dir / "worldpop_merged.csv"
         
-        # A. Join all features in memory (saved locally as backup, no 'raw' DB table is written)[cite: 7]
-        raw_table_path = output_dir / "training_table.csv"[cite: 7]
-        df_raw = create_training_table(sit_p, osrm_p, flow_p, wp_p, raw_table_path)[cite: 7]
+        # A. Join features in memory (no 'raw' table written to DB)[cite: 7]
+        raw_table_path = output_dir / "training_table.csv"
+        df_raw = create_training_table(sit_p, osrm_p, flow_p, wp_p, raw_table_path)
         
         # B. Apply feature trimming and missingness handling[cite: 6]
-        df_trimmed = trim_features(df_raw)[cite: 6]
-        df_final = handle_missingness(df_trimmed)[cite: 6]
+        df_trimmed = trim_features(df_raw)
+        df_final = handle_missingness(df_trimmed)
         
-        # Save local final output CSV
-        final_table_path = output_dir / "training_table_final.csv"[cite: 6]
-        df_final.to_csv(final_table_path, index=False)[cite: 6]
+        # Save local final output backup
+        final_table_path = output_dir / "training_table_final.csv"
+        df_final.to_csv(final_table_path, index=False)
 
         # Prepare DataFrame for SQL ingestion
         final_db = clean_dataframe(df_final.copy())
@@ -129,8 +127,6 @@ def run_pipeline():
         target_table_name = "training_table_final"
 
         # C. Secure DB Upload (TRUNCATE & APPEND ONLY)
-        # We run inside engine.begin() to guarantee transactional safety.
-        # This will empty the rows of training_table_final without dropping other tables or altering database schemas.
         with engine.begin() as conn:
             print(f"🧹 Truncating existing rows in `{target_table_name}`...")
             conn.exec_driver_sql(f"TRUNCATE TABLE {target_table_name};")
