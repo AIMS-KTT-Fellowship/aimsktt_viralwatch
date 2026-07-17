@@ -29,16 +29,13 @@ PILLAR_CLASSES = {
 def run_nlp_pipeline():
     """Runs Zero-Shot, Summarization, NER, and Emotion classifications over datasets."""
     
-    # --- LAZY IMPORTS ---
-    # Moved inside the function so the daily pipeline script can compile and run 
-    # all other stages even if 'transformers' or 'torch' are missing in the environment.
+    # --- LAZY IMPORTS (Strictly scoped inside function execution) ---
     try:
         from transformers import pipeline, AutoTokenizer, AutoModelForSeq2SeqLM
     except ModuleNotFoundError as e:
         print("\n" + "="*60)
         print("❌ ERROR: Missing deep learning dependencies for NLP stage.")
-        print("Please install them using:")
-        print("   pip install transformers torch")
+        print("Please install them using: pip install transformers torch")
         print("="*60 + "\n")
         raise e
 
