@@ -22,6 +22,8 @@ sentencepiece
 protobuf
 tqdm
 pyshp
+transformers
+torch
 
 
 
