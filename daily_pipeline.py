@@ -47,7 +47,7 @@ WP_DENSITY_PATH = BUILD_LONG_DIR / "worldpop__pop_density.csv"
 
 def clean_column_name(col):
     """Sanitizes columns to safe, standardized database snake_case."""
-    c = col.lower().strip()
+    c = str(col).lower().strip()
     c = re.sub(r'[^a-z0-9_]', '_', c)
     c = re.sub(r'_+', '_', c)
     return c.strip('_')
@@ -210,6 +210,7 @@ def run_pipeline():
 
     # --- 6. Generate Model Data Table (ML Outbreak Classification Features) ---
     print("\n⏳ Assembling ML features and classification target variables...")
+    model_table_name = "model_data"
     try:
         from ml_data_processing import (
             calculate_days_since_first_case,
@@ -250,8 +251,6 @@ def run_pipeline():
         # Enforce designated column order: health_zone first, then date
         db_cols_model = ["health_zone", "date"] + [c for c in model_db.columns if c not in ["health_zone", "date"]]
         model_db = model_db[db_cols_model]
-        
-        model_table_name = "model_data"
 
         # C. Secure DB Upload (Smart Check & Replace Schema)
         with engine.begin() as conn:
