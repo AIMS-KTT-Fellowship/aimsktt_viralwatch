@@ -264,7 +264,8 @@ def run_pipeline():
         
         # A. Execute Processing Flow
         print("   -> Calculating days since initial case benchmark...")
-        raw_cases = pd.read_csv(raw_sitrep_filepath, header=None)
+        # READ WITH HEADER: Eliminates automated dummy integer columns (0..31)
+        raw_cases = pd.read_csv(raw_sitrep_filepath)
         df_days = calculate_days_since_first_case(raw_cases)
         
         print("   -> Parsing spatial density distributions...")
@@ -276,6 +277,14 @@ def run_pipeline():
         print("   -> Assembling master model compilation...")
         df_master = assemble_model_data(df_days, df_pop_density, df_travel_time)
         df_target_features = create_target_variable(df_master)
+
+        # FILTER OUT UNWANTED NUMERIC INDEX COLS
+        # Removes any column that is numeric (e.g. 0, 1) or is a string representation of an integer (e.g. '0')
+        cols_to_keep = [
+            col for col in df_target_features.columns 
+            if not (isinstance(col, int) or str(col).isdigit())
+        ]
+        df_target_features = df_target_features[cols_to_keep]
 
         # Save a local CSV mirror backup
         ml_local_backup = output_dir / "model_data_final.csv"
@@ -289,29 +298,17 @@ def run_pipeline():
         db_cols_model = ["health_zone", "date"] + [c for c in model_db.columns if c not in ["health_zone", "date"]]
         model_db = model_db[db_cols_model]
 
-        # C. Secure DB Upload (Smart Check & Replace Schema)
+        # C. Secure DB Upload (FORCE DROP & RECREATE SCHEMA ON EACH RUN)
+        # This completely drops the old schema, clearing out old unlabelled numeric column traces
         with engine.begin() as conn:
-            inspector = inspect(engine)
+            print(f"🔄 Rebuilding `{model_table_name}` table to update schema and wipe numeric column traces...")
+            conn.exec_driver_sql(f"DROP TABLE IF EXISTS {model_table_name} CASCADE;")
             
-            if inspector.has_table(model_table_name):
-                db_columns = [col['name'] for col in inspector.get_columns(model_table_name)]
-                if db_columns[:2] == ["health_zone", "date"]:
-                    print(f"🧹 Table `{model_table_name}` schema matches. Truncating rows...")
-                    conn.exec_driver_sql(f"TRUNCATE TABLE {model_table_name};")
-                    if_exists_model = "append"
-                else:
-                    print(f"🔄 Schema mismatch in `{model_table_name}`. Dropping and rebuilding table...")
-                    conn.exec_driver_sql(f"DROP TABLE IF EXISTS {model_table_name} CASCADE;")
-                    if_exists_model = "replace"
-            else:
-                print(f"🆕 `{model_table_name}` table is missing. Recreating table fresh...")
-                if_exists_model = "replace"
-
             print(f"📥 Exporting structured features to `{model_table_name}`...")
             model_db.to_sql(
                 name=model_table_name,
                 con=conn,
-                if_exists=if_exists_model,
+                if_exists="replace",
                 index=False
             )
             
