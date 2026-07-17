@@ -44,10 +44,6 @@ def get_outbreak_prediction(input_data, model, scaler, model_type='rf'):
     }
 
 
-# ==========================================
-# TEST IT ON YOUR SCREEN RIGHT NOW
-# ==========================================
-
 # Load your saved models
 scaler = joblib.load('/content/models/feature_scaler.joblib')
 rf_model = joblib.load('/content/models/random_forest_baseline.joblib')
