@@ -27,7 +27,7 @@ print(f"   Training rows (May/June): {len(train_df)}")
 print(f"   Testing rows (July): {len(test_df)}")
 
 
-features = ['cumulative_confirmed_cases', 'days_since_first_case', 'pop_density', 'travel_time_to_epicenter']
+features = ['days_since_first_case', 'cumulative_confirmed_cases', 'cumulative_confirmed_deaths', 'cumulative_contacts_isolated', 'cumulative_contacts_traced', 'cumulative_suspected_cases', 'cumulative_suspected_deaths', 'pop_density', 'travel_time_to_epicenter' ]
 target = 'target_outbreak_next_7d'
 
 X_train = train_df[features]
