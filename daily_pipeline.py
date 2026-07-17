@@ -1,7 +1,9 @@
 import os
 import re
+import json
 from pathlib import Path
 import pandas as pd
+import numpy as np
 from sqlalchemy import create_engine, text, inspect
 
 from data_processing import (
@@ -15,6 +17,8 @@ from data_processing import (
     trim_features,
     handle_missingness
 )
+# Import your unified NLP engine runner
+from nlp_processing import run_nlp_pipeline
 
 # --- Database Engine Setup (Aiven Postgres Compatible) ---
 DATABASE_URL = os.environ.get("DATABASE_URL")
@@ -116,15 +120,16 @@ def run_pipeline():
     except Exception as e:
         print(f"❌ INSP Sitrep failed: {e}")
 
-    # --- 2. Calculate OSRM Nearest Active ---
+    # --- 2. Calculate OSRM Nearest Active (Purging -1) ---
     print("⏳ Processing travel matrices...")
     try:
         sitrep_path = output_dir / "insp_sitrep_training_window.csv"
         out_osrm_path = output_dir / "osrm_nearest_active_feature.csv"
         
         if sitrep_path.exists():
+            # This relies on the updated data_processing file which sanitizes -1 into median metrics
             compute_osrm_nearest_active(OSRM_PATH, ALIASES_PATH, sitrep_path, out_osrm_path)
-            print("✅ Travel metrics compiled.")
+            print("✅ Travel metrics compiled (Negative/isolated nodes scrubbed via median values).")
     except Exception as e:
         print(f"❌ Travel metric calculation failed: {e}")
 
@@ -192,9 +197,7 @@ def run_pipeline():
             
             # --- 1. Handle Raw Table ---
             if inspector.has_table(raw_table_name):
-                # Retrieve the current database column order
                 db_columns = [col['name'] for col in inspector.get_columns(raw_table_name)]
-                # Check if "health_zone" and "date" are already the first two columns
                 if db_columns[:2] == ["health_zone", "date"]:
                     print(f"🧹 Table `{raw_table_name}` has correct column order. Truncating rows...")
                     conn.exec_driver_sql(f"TRUNCATE TABLE {raw_table_name};")
@@ -217,9 +220,7 @@ def run_pipeline():
 
             # --- 2. Handle Final Table ---
             if inspector.has_table(final_table_name):
-                # Retrieve the current database column order
                 db_columns = [col['name'] for col in inspector.get_columns(final_table_name)]
-                # Check if "health_zone" and "date" are already the first two columns
                 if db_columns[:2] == ["health_zone", "date"]:
                     print(f"🧹 Table `{final_table_name}` has correct column order. Truncating rows...")
                     conn.exec_driver_sql(f"TRUNCATE TABLE {final_table_name};")
@@ -257,10 +258,9 @@ def run_pipeline():
             create_target_variable
         )
 
-        # Dynamic inputs pointing to generated pipeline CSV pathways
         raw_sitrep_filepath = output_dir / "insp_sitrep_training_window.csv"
         pop_filepath = BUILD_LONG_DIR / "worldpop__pop_density.csv"
-        matrix_filepath = OSRM_PATH  # Pointing directly to build/matrix/...
+        matrix_filepath = OSRM_PATH  
         
         # A. Execute Processing Flow
         print("   -> Calculating days since initial case benchmark...")
@@ -273,25 +273,30 @@ def run_pipeline():
         print("   -> Evaluating travel metrics relative to Bunia epicenter...")
         df_travel_time = extract_distance_to_epicenter(matrix_filepath, epicenter_name="Bunia")
         
+        # --- PREVENTING -1 SURVIVAL IN BASE FEATURES ---
+        # Explicit backup safety: Replace negative indices within base metrics with the global slice median
+        df_travel_time['travel_time_to_epicenter'] = pd.to_numeric(df_travel_time['travel_time_to_epicenter'], errors='coerce')
+        df_travel_time.loc[df_travel_time['travel_time_to_epicenter'] < 0, 'travel_time_to_epicenter'] = np.nan
+        travel_median = df_travel_time['travel_time_to_epicenter'].dropna().median() if not df_travel_time['travel_time_to_epicenter'].dropna().empty else 0
+        df_travel_time['travel_time_to_epicenter'] = df_travel_time['travel_time_to_epicenter'].fillna(travel_median)
+        
         print("   -> Assembling master model compilation...")
         df_master = assemble_model_data(df_days, df_pop_density, df_travel_time)
         df_target_features = create_target_variable(df_master)
 
-        # --- DYNAMIC DROP: Clean and robust removal of raw numeric and date headers ---
+        # Clean raw numeric and date headers
         date_pattern = re.compile(r'^\d{4}-\d{2}-\d{2}$')
         cols_to_keep = []
         for col in df_target_features.columns:
             col_str = str(col)
-            # Retain spatial-temporal identifiers
             if col in ["nom", "date"]:
                 cols_to_keep.append(col)
-            # Filter out numbers and dates, keeping engineered features
             elif not (col_str.isdigit() or isinstance(col, int) or date_pattern.match(col_str)):
                 cols_to_keep.append(col)
 
         df_target_features = df_target_features[cols_to_keep]
 
-        # Save a local CSV mirror backup
+        # Save local backup
         ml_local_backup = output_dir / "model_data_final.csv"
         df_target_features.to_csv(ml_local_backup, index=False)
 
@@ -299,11 +304,10 @@ def run_pipeline():
         model_db = df_target_features.copy()
         model_db.columns = [clean_column_name(c) for c in model_db.columns]
         
-        # Enforce designated column order: health_zone first, then date
         db_cols_model = ["health_zone", "date"] + [c for c in model_db.columns if c not in ["health_zone", "date"]]
         model_db = model_db[db_cols_model]
 
-        # C. Secure DB Upload (FORCE COMPLETE REBUILD ON EACH RUN)
+        # C. Secure DB Upload
         with engine.begin() as conn:
             print(f"🔄 Dropping and rebuilding `{model_table_name}` schema to cleanly update structural columns...")
             conn.exec_driver_sql(f"DROP TABLE IF EXISTS {model_table_name} CASCADE;")
@@ -325,28 +329,21 @@ def run_pipeline():
     print("\n⏳ Running Machine Learning Model training & forecasting...")
     try:
         try:
-            # 1. Try to load the primary forecasting model module
             from train_model import generate_forecasts
             print("🚀 'train_model' module loaded successfully. Commencing forecast computation...")
             predictions_df = generate_forecasts(final_table_path)
         except ModuleNotFoundError:
-            # 2. Fall back to heuristic forecaster if module is absent
             predictions_df = generate_fallback_forecasts(final_table_path)
         
-        # 3. Standardize column schema names
         predictions_df.columns = [clean_column_name(c) for c in predictions_df.columns]
         
-        # Expected structure: 'health_zone', 'date', 'predicted_cases'
         predictions_db = predictions_df[["health_zone", "date", "predicted_cases"]].copy()
         predictions_db["date"] = pd.to_datetime(predictions_db["date"]).dt.date
         
         prediction_table_name = "model_predictions"
 
-        # 4. Securely write forecasts to the DB
         with engine.begin() as conn:
             inspector = inspect(engine)
-            
-            # Check if predictions table exists to control schema changes or truncate
             if inspector.has_table(prediction_table_name):
                 print(f"🧹 Table `{prediction_table_name}` exists. Truncating rows...")
                 conn.exec_driver_sql(f"TRUNCATE TABLE {prediction_table_name};")
@@ -364,10 +361,48 @@ def run_pipeline():
             )
             
         print(f"💾 Successfully logged model predictions to `{prediction_table_name}`!")
-        print("🎉 Entire pipeline execution completed from raw ingest to analytical DB predictions!")
 
     except Exception as e:
         print(f"❌ Model training or prediction upload failed: {e}")
+
+    # --- 8. RUN CONSOLIDATED NLP ENGINE & LOG TO DATABASE (PLACED AT THE VERY END) ---
+    print("\n⏳ [FINAL STAGE] Launching Long-Running NLP Processing Engine...")
+    print("   ※ Deep learning transformers initialized. Please standby...")
+    nlp_table_name = "nlp_result"
+    try:
+        # Run combined text jobs (Zero-Shot, Summarization, NER, Emotion)[cite: 3, 4, 5, 6]
+        nlp_df = run_nlp_pipeline()
+        
+        if nlp_df is not None and not nlp_df.empty:
+            print("📥 Uploading processed NLP elements into relational data schema...")
+            
+            # Sanitize columns to safe snake_case structure
+            nlp_db_ready = nlp_df.copy()
+            nlp_db_ready.columns = [clean_column_name(c) for c in nlp_db_ready.columns]
+            
+            # Enforce standardized geographic structure order
+            if "health_zone" in nlp_db_ready.columns and "date" in nlp_db_ready.columns:
+                nlp_cols_ordered = ["health_zone", "date"] + [c for c in nlp_db_ready.columns if c not in ["health_zone", "date"]]
+                nlp_db_ready = nlp_db_ready[nlp_cols_ordered]
+            
+            with engine.begin() as conn:
+                print(f"🔄 Rebuilding system table `{nlp_table_name}`...")
+                conn.exec_driver_sql(f"DROP TABLE IF EXISTS {nlp_table_name} CASCADE;")
+                
+                nlp_db_ready.to_sql(
+                    name=nlp_table_name,
+                    con=conn,
+                    if_exists="replace",
+                    index=False
+                )
+            print(f"💾 Table `{nlp_table_name}` safely logged inside Postgres Database backend!")
+        else:
+            print("⚠️ NLP processing yielded zero valid updates for pipeline conversion.")
+            
+        print("\n🎉 Entire pipeline execution completed from raw ingest to analytical DB predictions!")
+        
+    except Exception as e:
+         print(f"❌ Critical Error occurred inside Stage 8 NLP pipeline routines: {e}")
 
 
 if __name__ == "__main__":
