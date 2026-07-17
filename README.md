@@ -626,3 +626,7 @@ and also actual real time dATABASE
 
 And the database is now active 
 
+
+its fully deployed on render 
+
+with all the full map intgrated for dahsbord 
