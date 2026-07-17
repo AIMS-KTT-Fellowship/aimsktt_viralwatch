@@ -29,7 +29,7 @@ STATUS_TRANSLATIONS = {
 DROP_SUFFIXES = ("__static", ".matrix")
 KEEP_FLOWMINDER_PREFIX = "flowminder_short_trips__"
 
-# --- ML Step 1 & 2 Config ---
+# --- ML Trimming & Missingness Config ---
 COLLINEAR_DROP_COLS = [
     "total_poe_hand_washing", "total_poe_passed", "total_poe_sanitised",
     "total_poe_refused_hand_washing",
@@ -311,6 +311,11 @@ def create_training_table(sitrep_path: Path, osrm_path: Path, flow_path: Path, w
     df = df.merge(flow, on="nom", how="left")
     df = df.merge(wp, on="nom", how="left")
 
+    # Force "nom" (health zone) and "date" to be the first two columns
+    first_cols = ["nom", "date"]
+    remaining_cols = [col for col in df.columns if col not in first_cols]
+    df = df[first_cols + remaining_cols]
+
     out_path.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(out_path, index=False)
     return df
@@ -329,13 +334,13 @@ def trim_features(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def handle_missingness(df: pd.DataFrame) -> pd.DataFrame:
-    """Implements missingness cleanup, forward-fills and specific-imputation strategies."""
+    """Implements missingness cleanup, forward-fills, and specific-imputation strategies."""
     # 1. Drop highly sparse columns
     high_missing = df.isna().mean() > HIGH_MISSING_THRESHOLD
     drop_cols = high_missing[high_missing].index.tolist()
     df = df.drop(columns=drop_cols)
 
-    # 2. Forward fill cumulative variables
+    # 2. Forward fill cumulative variables per zone
     cum_cols = [c for c in df.columns if c.startswith("cumulative_")]
     df = df.sort_values(["nom", "date"])
     df[cum_cols] = df.groupby("nom")[cum_cols].ffill()
