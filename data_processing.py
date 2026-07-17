@@ -311,6 +311,11 @@ def create_training_table(sitrep_path: Path, osrm_path: Path, flow_path: Path, w
     df = df.merge(flow, on="nom", how="left")
     df = df.merge(wp, on="nom", how="left")
 
+    # Force "nom" (health zone) and "date" to be the first two columns
+    first_cols = ["nom", "date"]
+    remaining_cols = [col for col in df.columns if col not in first_cols]
+    df = df[first_cols + remaining_cols]
+
     out_path.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(out_path, index=False)
     return df
