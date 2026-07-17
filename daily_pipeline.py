@@ -1,229 +1,207 @@
 import os
-import glob
-import hashlib
+import re
+from pathlib import Path
 import pandas as pd
-from sqlalchemy import create_engine, text
-from data_processing import clean_dataframe, process_shapefile
+from sqlalchemy import create_engine, text, inspect
 
-# 1. Fetch Aiven Connection String from Environment
+from data_processing import (
+    clean_dataframe,
+    join_insp_sitrep_csvs,
+    join_flowminder_csvs,
+    compute_osrm_nearest_active,
+    clean_and_merge_flowminder,
+    merge_worldpop,
+    create_training_table,
+    trim_features,
+    handle_missingness
+)
+
+# --- Database Engine Setup ---
 DATABASE_URL = os.environ.get("DATABASE_URL")
-
 if DATABASE_URL:
     if DATABASE_URL.startswith("postgres://"):
         DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
     engine = create_engine(DATABASE_URL)
-    print("🔌 Connected successfully to your Cloud Aiven PostgreSQL database!")
 else:
-    engine = create_engine("sqlite:///data_test/viralwatch.db")
-    print("📁 DATABASE_URL not found. Saving locally to data_test/viralwatch.db.")
+    engine = create_engine("sqlite:///viralwatch.db")
 
-def reorder_columns(df):
-    """
-    Reorders a DataFrame to guarantee:
-    1st: Nom/Geographic Keys (health_zone, province)
-    2nd: Count data (columns containing 'count')
-    3rd: Density data (columns containing 'density')
-    """
-    cols = list(df.columns)
-    
-    # Identify and categorize columns
-    key_cols = [c for c in cols if c in ['health_zone', 'province']]
-    count_cols = [c for c in cols if 'count' in c and c not in key_cols]
-    density_cols = [c for c in cols if 'density' in c and c not in key_cols]
-    
-    # Any other remaining columns
-    other_cols = [c for c in cols if c not in key_cols and c not in count_cols and c not in density_cols]
-    
-    # Construct strictly ordered column list
-    ordered_cols = key_cols + count_cols + density_cols + other_cols
-    return df[ordered_cols]
 
-def clean_and_sync():
-    print("🔥 Starting complete database wipe-and-rebuild cycle...")
-    
-    if DATABASE_URL:
-        try:
-            with engine.begin() as conn:
-                print("🧹 Dropping and recreating public schema...")
-                conn.execute(text("DROP SCHEMA public CASCADE;"))
-                conn.execute(text("CREATE SCHEMA public;"))
-                conn.execute(text("GRANT ALL ON SCHEMA public TO public;"))
-                print("✨ Schema successfully reset to empty!")
-        except Exception as e:
-            print(f"⚠️ Warning: Schema reset failed: {e}. Moving to standard table replacements.")
+# --- Local Paths ---
+DATA_REPO_DIR = Path("BDBV2026-Data")
+BUILD_LONG_DIR = DATA_REPO_DIR / "build" / "long"
+BUILD_DIR = DATA_REPO_DIR / "build"
 
-    # Gather everything saved inside data_test
-    all_files = glob.glob(os.path.join("data_test", "*"))
-    processed_count = 0
-    
-    # Structures to hold files for merging
-    worldpop_dfs = {"count": None, "density": None}
-    crossborder_dfs = {}  # Dictionary mapping suffix -> DataFrame
-    
-    for file_path in all_files:
-        filename = os.path.basename(file_path)
-        name_lower = filename.lower()
+# Source configurations
+OSRM_PATH = BUILD_LONG_DIR / "osrm__travel_time.csv"
+ALIASES_PATH = DATA_REPO_DIR / "data" / "aliases.csv"
+WP_COUNT_PATH = BUILD_LONG_DIR / "worldpop__pop_count.csv"
+WP_DENSITY_PATH = BUILD_LONG_DIR / "worldpop__pop_density.csv"
+
+
+def clean_column_name(col):
+    """Sanitizes columns to safe, standardized database snake_case."""
+    c = col.lower().strip()
+    c = re.sub(r'[^a-z0-9_]', '_', c)
+    c = re.sub(r'_+', '_', c)
+    return c.strip('_')
+
+
+def run_pipeline():
+    workspace_root = Path(".").resolve()
+    output_dir = workspace_root / "output"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # --- 1. Compile INSP Sitreps ---
+    print("⏳ Compiling INSP Sitreps...")
+    try:
+        merged_sitrep_path = output_dir / "insp_sitrep_merged.csv"
+        raw_sitrep = join_insp_sitrep_csvs(BUILD_LONG_DIR, merged_sitrep_path)
         
-        # Determine if file is targeted
-        is_matched = (
-            name_lower.startswith("insp") or
-            name_lower.startswith("epi_cases") or
-            name_lower.startswith("worldpop_") or
-            name_lower.startswith("osrm_") or
-            name_lower.startswith("cross_border") or
-            name_lower.startswith("flowminder_short") or
-            name_lower.startswith("grid3_healthsites") or
-            name_lower.endswith(".shp")
-        )
+        for col in raw_sitrep.columns:
+            if col not in ["nom", "date"]:
+                raw_sitrep[col] = raw_sitrep[col].replace("ND", pd.NA)
+                raw_sitrep[col] = pd.to_numeric(raw_sitrep[col], errors="coerce")
+
+        zone_rows = raw_sitrep[raw_sitrep["nom"].notna()].copy()
+        zone_rows = zone_rows[zone_rows["date"].notna()].copy()
+        zone_rows.to_csv(output_dir / "insp_sitrep_zone_level_clean.csv", index=False)
+
+        training_df = zone_rows[(zone_rows["date"] >= "2026-05-14") & (zone_rows["date"] <= "2026-05-29")].copy()
+        training_df.to_csv(output_dir / "insp_sitrep_training_window.csv", index=False)
+        print("✅ INSP Sitrep compilation completed.")
+    except Exception as e:
+        print(f"❌ INSP Sitrep failed: {e}")
+
+    # --- 2. Calculate OSRM Nearest Active ---
+    print("⏳ Processing travel matrices...")
+    try:
+        sitrep_path = output_dir / "insp_sitrep_training_window.csv"
+        out_osrm_path = output_dir / "osrm_nearest_active_feature.csv"
         
-        if not is_matched:
-            continue
+        if sitrep_path.exists():
+            compute_osrm_nearest_active(OSRM_PATH, ALIASES_PATH, sitrep_path, out_osrm_path)
+            print("✅ Travel metrics compiled.")
+    except Exception as e:
+        print(f"❌ Travel metric calculation failed: {e}")
+
+    # --- 3. Clean and Merge Flowminder ---
+    print("⏳ Processing Flowminder data...")
+    try:
+        merged_flowminder_path = output_dir / "flowminder_merged.csv"
+        join_flowminder_csvs(BUILD_LONG_DIR, merged_flowminder_path)
+        clean_and_merge_flowminder(merged_flowminder_path, output_dir / "flowminder_clean.csv")
+        print("✅ Flowminder pipeline finished.")
+    except Exception as e:
+        print(f"❌ Flowminder pipeline failed: {e}")
+
+    # --- 4. Merge WorldPop ---
+    print("⏳ Merging WorldPop parameters...")
+    try:
+        merge_worldpop(WP_COUNT_PATH, WP_DENSITY_PATH, output_dir / "worldpop_merged.csv")
+        print("✅ WorldPop configuration finished.")
+    except Exception as e:
+        print(f"❌ WorldPop merging failed: {e}")
+
+    # --- 5. Generate and Clean ML-Ready Training Tables ---
+    print("\n⏳ Building training datasets...")
+    try:
+        sit_p = output_dir / "insp_sitrep_training_window.csv"
+        osrm_p = output_dir / "osrm_nearest_active_feature.csv"
+        flow_p = output_dir / "flowminder_clean.csv"
+        wp_p = output_dir / "worldpop_merged.csv"
+        
+        # A. Join features in memory (CSVs will already have "nom" and "date" first)
+        raw_table_path = output_dir / "training_table.csv"
+        df_raw = create_training_table(sit_p, osrm_p, flow_p, wp_p, raw_table_path)
+        
+        # B. Apply feature trimming and missingness handling
+        df_trimmed = trim_features(df_raw)
+        df_final = handle_missingness(df_trimmed)
+        
+        # Ensure final CSV has "nom" and "date" first
+        final_table_path = output_dir / "training_table_final.csv"
+        df_final = df_final[["nom", "date"] + [c for c in df_final.columns if c not in ["nom", "date"]]]
+        df_final.to_csv(final_table_path, index=False)
+
+        # Prepare Raw DataFrame for SQL ingestion
+        raw_db = clean_dataframe(df_raw.copy())
+        raw_db.columns = [clean_column_name(c) for c in raw_db.columns]
+        
+        # Force "health_zone" first, "date" second
+        db_cols_raw = ["health_zone", "date"] + [c for c in raw_db.columns if c not in ["health_zone", "date"]]
+        raw_db = raw_db[db_cols_raw]
+
+        # Prepare Final DataFrame for SQL ingestion
+        final_db = clean_dataframe(df_final.copy())
+        final_db.columns = [clean_column_name(c) for c in final_db.columns]
+        
+        # Force "health_zone" first, "date" second
+        db_cols_final = ["health_zone", "date"] + [c for c in final_db.columns if c not in ["health_zone", "date"]]
+        final_db = final_db[db_cols_final]
+        
+        raw_table_name = "training_table_raw"
+        final_table_name = "training_table_final"
+
+        # C. Secure DB Upload (FORCE EXACT COLUMN ORDER USING DROP & REPLACE)
+        with engine.begin() as conn:
+            inspector = inspect(engine)
             
-        clean_name = (filename.lower()
-                      .replace(".matrix.csv", "_matrix")
-                      .replace(".csv", "")
-                      .replace(".shp", "_shapefile")
-                      .replace("__", "_")
-                      .replace(".", "_")
-                      .replace("-", "_"))
-        
-        # PostgreSQL limit safety: Truncate table names if they exceed 60 characters
-        if len(clean_name) > 60:
-            name_hash = hashlib.md5(clean_name.encode('utf-8')).hexdigest()[:6]
-            clean_name = f"{clean_name[:50]}_{name_hash}"
-        
-        if any(name_lower.endswith(ext) for ext in [".shx", ".dbf", ".prj", ".cpg"]):
-            continue
-
-        # Dynamic Route 1: Group WorldPop Components
-        if name_lower.startswith("worldpop_"):
-            try:
-                print(f"🌍 Reading WorldPop Component: '{filename}'")
-                raw_df = pd.read_csv(file_path)
-                processed_df = clean_dataframe(raw_df)
-                
-                if "density" in name_lower:
-                    worldpop_dfs["density"] = processed_df
+            # --- 1. Handle Raw Table ---
+            if inspector.has_table(raw_table_name):
+                # Retrieve the current database column order
+                db_columns = [col['name'] for col in inspector.get_columns(raw_table_name)]
+                # Check if "health_zone" and "date" are already the first two columns
+                if db_columns[:2] == ["health_zone", "date"]:
+                    print(f"🧹 Table `{raw_table_name}` has correct column order. Truncating rows...")
+                    conn.exec_driver_sql(f"TRUNCATE TABLE {raw_table_name};")
+                    if_exists_raw = "append"
                 else:
-                    worldpop_dfs["count"] = processed_df
-                continue 
-            except Exception as e:
-                print(f"❌ Failed to extract WorldPop segment '{filename}': {e}")
-                continue
+                    print(f"🔄 Column order mismatch in `{raw_table_name}`. Dropping and recreating table...")
+                    conn.exec_driver_sql(f"DROP TABLE IF EXISTS {raw_table_name} CASCADE;")
+                    if_exists_raw = "replace"
+            else:
+                print(f"🆕 `{raw_table_name}` does not exist. Creating it fresh...")
+                if_exists_raw = "replace"
 
-        # Dynamic Route 2: Group Crossborder Components
-        if name_lower.startswith("cross_border"):
-            try:
-                print(f"🛂 Reading Cross-border Component: '{filename}'")
-                raw_df = pd.read_csv(file_path)
-                processed_df = clean_dataframe(raw_df)
-                
-                # Determine suffix based on name identifiers
-                if "density" in name_lower:
-                    suffix = "density"
-                elif "count" in name_lower or "pop" in name_lower:
-                    suffix = "count"
+            print(f"📥 Loading data into `{raw_table_name}`...")
+            raw_db.to_sql(
+                name=raw_table_name,
+                con=conn,
+                if_exists=if_exists_raw,
+                index=False
+            )
+
+            # --- 2. Handle Final Table ---
+            if inspector.has_table(final_table_name):
+                # Retrieve the current database column order
+                db_columns = [col['name'] for col in inspector.get_columns(final_table_name)]
+                # Check if "health_zone" and "date" are already the first two columns
+                if db_columns[:2] == ["health_zone", "date"]:
+                    print(f"🧹 Table `{final_table_name}` has correct column order. Truncating rows...")
+                    conn.exec_driver_sql(f"TRUNCATE TABLE {final_table_name};")
+                    if_exists_final = "append"
                 else:
-                    suffix = name_lower.replace("cross_border_", "").replace(".csv", "")[:15]
-                
-                crossborder_dfs[suffix] = processed_df
-                continue
-            except Exception as e:
-                print(f"❌ Failed to extract Cross-border segment '{filename}': {e}")
-                continue
-
-        print(f"📦 Re-building Table: '{clean_name}' from raw file...")
-        
-        try:
-            if name_lower.endswith(".shp"):
-                processed_df = process_shapefile(file_path)
+                    print(f"🔄 Column order mismatch in `{final_table_name}`. Dropping and recreating table...")
+                    conn.exec_driver_sql(f"DROP TABLE IF EXISTS {final_table_name} CASCADE;")
+                    if_exists_final = "replace"
             else:
-                raw_df = pd.read_csv(file_path)
-                processed_df = clean_dataframe(raw_df)
-            
-            # Save normal table to database
-            processed_df.to_sql(clean_name, engine, if_exists='replace', index=False)
-            print(f"✔ Table '{clean_name}' completely replaced.")
-            processed_count += 1
-            
-        except Exception as e:
-            print(f"❌ Failed to process '{filename}': {e}")
+                print(f"🆕 `{final_table_name}` does not exist. Creating it fresh...")
+                if_exists_final = "replace"
 
-    # ==========================================
-    # Dynamic Join: Merge & Order WorldPop
-    # ==========================================
-    if worldpop_dfs["count"] is not None or worldpop_dfs["density"] is not None:
-        try:
-            print("🔗 Merging and formatting WorldPop dataframes...")
-            if worldpop_dfs["count"] is not None and worldpop_dfs["density"] is not None:
-                keys_count = list(worldpop_dfs["count"].columns)
-                keys_density = list(worldpop_dfs["density"].columns)
-                common_keys = [col for col in keys_count if col in keys_density and col in ['health_zone', 'province']]
-                if not common_keys:
-                    common_keys = [keys_count[0]]
-                
-                merged_worldpop = pd.merge(
-                    worldpop_dfs["count"], 
-                    worldpop_dfs["density"], 
-                    on=common_keys, 
-                    how="outer", 
-                    suffixes=('_count', '_density')
-                )
-            else:
-                merged_worldpop = worldpop_dfs["count"] if worldpop_dfs["count"] is not None else worldpop_dfs["density"]
-            
-            # Reorder columns: [Names] -> [Count] -> [Density]
-            merged_worldpop = reorder_columns(merged_worldpop)
-            
-            merged_worldpop.to_sql("worldpop_nom_count_density", engine, if_exists='replace', index=False)
-            print("✔ Table 'worldpop_nom_count_density' successfully built (correct columns ordered!).")
-            processed_count += 1
-        except Exception as e:
-            print(f"❌ Failed to join combined WorldPop table: {e}")
-
-    # ==========================================
-    # Dynamic Join: Merge & Order Crossborder
-    # ==========================================
-    if crossborder_dfs:
-        try:
-            print("🔗 Merging and formatting Cross-border dataframes...")
-            suffixes = list(crossborder_dfs.keys())
-            
-            merged_cb = crossborder_dfs[suffixes[0]]
-            keys_cb = [col for col in merged_cb.columns if col in ['health_zone', 'province']]
-            if not keys_cb:
-                keys_cb = [merged_cb.columns[0]]
-                
-            merged_cb = merged_cb.rename(
-                columns={c: f"{c}_{suffixes[0]}" for c in merged_cb.columns if c not in keys_cb}
+            print(f"📥 Loading clean data into `{final_table_name}`...")
+            final_db.to_sql(
+                name=final_table_name,
+                con=conn,
+                if_exists=if_exists_final,
+                index=False
             )
             
-            for _suff in suffixes[1:]:
-                next_df = crossborder_dfs[_suff]
-                next_keys = [col for col in next_df.columns if col in ['health_zone', 'province']]
-                if not next_keys:
-                    next_keys = [next_df.columns[0]]
-                
-                join_on = list(set(keys_cb).intersection(next_keys))
-                if not join_on:
-                    join_on = [keys_cb[0]]
-                
-                next_df_renamed = next_df.rename(
-                    columns={c: f"{c}_{_suff}" for c in next_df.columns if c not in join_on}
-                )
-                
-                merged_cb = pd.merge(merged_cb, next_df_renamed, on=join_on, how="outer")
-            
-            # Reorder columns: [Names] -> [Count] -> [Density]
-            merged_cb = reorder_columns(merged_cb)
-            
-            merged_cb.to_sql("crossborder_nom_count_density", engine, if_exists='replace', index=False)
-            print("✔ Table 'crossborder_nom_count_density' successfully built (correct columns ordered!).")
-            processed_count += 1
-        except Exception as e:
-            print(f"❌ Failed to join combined Cross-border table: {e}")
-            
-    print(f"🎉 Complete! All previous tables cleared; {processed_count} unified tables deployed successfully.")
+        print(f"💾 Successfully synchronized both SQL tables with fixed column sequence!")
+        print(f"✅ Success! Active training window contains {len(df_final)} validated data points.")
+
+    except Exception as e:
+        print(f"❌ Generating training data outputs failed: {e}")
+
 
 if __name__ == "__main__":
-    clean_and_sync()
+    run_pipeline()
