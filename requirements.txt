@@ -14,8 +14,17 @@ pytest
 # Database Integration (Cloud Postgres & Local SQLite support)
 SQLAlchemy>=2.0.0
 psycopg2-binary>=2.9.0
-pyshp
 
+# NLP Processing
+transformers
+torch
+sentencepiece
+protobuf
+tqdm
+pyshp
+transformers
+torch
+tqdm
 
 
 # for dashbord 
