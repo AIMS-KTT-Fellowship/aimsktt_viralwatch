@@ -81,7 +81,7 @@ function drawWatchlist(ew) {
       <td class="num"><span class="score-chip" style="background:${colorFor(
         z.warning_score
       )}">${z.warning_score.toFixed(2)}</span></td>
-      <td class="num">${z.new_cases_last7}</td>`;
+      <td class="num">${Math.round(z.pop_density).toLocaleString()}</td>`;
     tr.addEventListener("click", () => selectZone(z.zone));
     rowsByZone[z.zone] = tr;
     body.appendChild(tr);
@@ -140,14 +140,15 @@ function showDetail(p) {
   document.getElementById("detail-zone").textContent =
     `${p.zone} — ${p.province}${p.borders_rwanda ? " · borders Rwanda" : ""}`;
   const pct = (p.next7d_case_probability * 100).toFixed(0);
+  const ccvi = p.ccvi_deprivation != null ? p.ccvi_deprivation.toFixed(2) : "—";
   document.getElementById("detail-grid").innerHTML = `
     <div class="dm prob-big"><span class="dm-val" style="color:${colorFor(
       p.next7d_case_probability
-    )}">${pct}%</span><span class="dm-lbl">next-7-day case probability</span></div>
-    <div class="dm"><span class="dm-val">${p.cumulative_cases}</span><span class="dm-lbl">cumulative cases</span></div>
-    <div class="dm"><span class="dm-val">${p.days_since_first_case}</span><span class="dm-lbl">days since first case</span></div>
-    <div class="dm"><span class="dm-val">${p.travel_time_min}m</span><span class="dm-lbl">travel to treatment</span></div>
-    <div class="dm"><span class="dm-val">${p.population_density}</span><span class="dm-lbl">pop density /km²</span></div>`;
+    )}">${pct}%</span><span class="dm-lbl">next-7-day case probability (placeholder)</span></div>
+    <div class="dm"><span class="dm-val">${Math.round(p.pop_count).toLocaleString()}</span><span class="dm-lbl">population (WorldPop)</span></div>
+    <div class="dm"><span class="dm-val">${Math.round(p.pop_density).toLocaleString()}</span><span class="dm-lbl">density /km²</span></div>
+    <div class="dm"><span class="dm-val">${p.healthsites}</span><span class="dm-lbl">health facilities</span></div>
+    <div class="dm"><span class="dm-val">${ccvi}</span><span class="dm-lbl">CCVI deprivation</span></div>`;
 }
 
 document.getElementById("detail-close").addEventListener("click", () => {
