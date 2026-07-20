@@ -41,7 +41,7 @@ scaler = joblib.load('/content/aimsktt_viralwatch/ml/models/feature_scaler.jobli
 rf_model = joblib.load('/content/aimsktt_viralwatch/ml/models/random_forest_baseline.joblib')
 
 print("2. Loading dataset and extracting the test set (July 2026)...")
-filepath = "/content/aimsktt_viralwatch/ml/datasets/final_ml_training_dataset.csv"
+filepath = "/content/aimsktt_viralwatch/ml/dataset/final_ml_training_dataset.csv"
 df = pd.read_csv(filepath)
 df['date'] = pd.to_datetime(df['date'])
 
