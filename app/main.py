@@ -85,6 +85,10 @@ def early_warning():
     )
 
 
+
+
+
+
 @app.get("/predict/{zone}", response_model=PredictResponse, tags=["signals"])
 def predict(zone: str):
     """Probability that `zone` reports new cases in the next 7 days.
@@ -108,8 +112,30 @@ def predict(zone: str):
     # from joblib import load
     # model = load(ROOT / "models" / "classifier.joblib")
     # prob = float(model.predict_proba([[...features...]])[0, 1])
-    prob = float(r["next7d_prob"])
+    # prob = float(r["next7d_prob"]) 
     # ----------------------------------------------------------------------
+
+
+    import pandas as pd
+
+    PREDICTIONS = pd.read_csv(
+        ROOT / "ml" / "results" / "test_set_outbreak_predictions.csv"
+    )
+
+
+    # Look up the latest prediction for this health zone
+    rows = PREDICTIONS[
+        PREDICTIONS["health_zone"].str.lower() == zone.lower()
+    ]
+
+    if rows.empty:
+        # Fallback to the database value
+        prob = float(r["next7d_prob"])
+    else:
+        # Get the most recent prediction by date
+        latest = rows.sort_values("date").iloc[-1]
+        prob = float(latest["predicted_probability_next_7d"])
+
 
 
 
