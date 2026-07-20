@@ -352,6 +352,7 @@ The dashboard displays updated cross-border outbreak risk information covering:
 # Benefits of Incremental Updating
 
 The incremental pipeline provides:
+
 ✅ Faster data processing compared with full dataset rebuilding
 
 ✅ Continuous outbreak surveillance capability
