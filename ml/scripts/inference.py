@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 import joblib
 from tensorflow import keras
+import os
 
 def get_outbreak_prediction(input_data, model, scaler, model_type='rf'):
     """
@@ -71,7 +72,9 @@ results_df['predicted_probability_next_7d'] = test_probabilities
 results_df['probability_display'] = (results_df['predicted_probability_next_7d'] * 100).round(1).astype(str) + '%'
 
 # Define the output path and save
+
 output_csv_path = "/content/aimsktt_viralwatch/ml/results/test_set_outbreak_predictions.csv"
+os.makedirs(os.path.dirname(output_csv_path), exist_ok=True)
 results_df.to_csv(output_csv_path, index=False)
 
 print(f" [+] Success! Test set predictions saved to: {output_csv_path}")
