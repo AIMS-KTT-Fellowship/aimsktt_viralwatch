@@ -1,0 +1,8 @@
+services:
+
+  viralwatch:
+    image: kbshafenta/viralwatch:v1
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: ${DATABASE_URL}

@@ -1,3 +1,6 @@
+The whole project is now live on https://viralwatch.onrender.com/
+with full docker image
+
 # Incremental Data Update Pipeline
 
 ## Overview
@@ -351,10 +354,15 @@ The dashboard displays updated cross-border outbreak risk information covering:
 The incremental pipeline provides:
 
 ✅ Faster data processing compared with full dataset rebuilding
+
 ✅ Continuous outbreak surveillance capability
+
 ✅ Reliable handling of changing epidemiological information
+
 ✅ Updated machine learning predictions
+
 ✅ Near real-time dashboard monitoring
+
 ✅ Scalable architecture for future outbreak sources
 
 ---
@@ -485,6 +493,7 @@ Day 3 Tasks
 
 1. creating proper venv , to the proper deployment for next step 
 2. with Dashbord Draft for final deployment 
+3. prepAR THE DAtaset and analayz ther data , visuallize 
 
 So whAT WE DO IS 
 
@@ -623,3 +632,10 @@ and also actual real time dATABASE
 .
 .
 
+
+And the database is now active 
+
+
+its fully deployed on render 
+
+with all the full map intgrated for dahsbord 
