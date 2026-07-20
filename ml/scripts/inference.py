@@ -37,11 +37,11 @@ def get_outbreak_prediction(input_data, model, scaler, model_type='rf'):
 # ==========================================
 
 print("1. Loading saved models and scaler...")
-scaler = joblib.load('/content/models/feature_scaler.joblib')
-rf_model = joblib.load('/content/models/random_forest_baseline.joblib')
+scaler = joblib.load('/content/aimsktt_viralwatch/ml/models/feature_scaler.joblib')
+rf_model = joblib.load('/content/aimsktt_viralwatch/ml/models/random_forest_baseline.joblib')
 
 print("2. Loading dataset and extracting the test set (July 2026)...")
-filepath = "/content/final_ml_training_dataset.csv"
+filepath = "/content/aimsktt_viralwatch/ml/datasets/final_ml_training_dataset.csv"
 df = pd.read_csv(filepath)
 df['date'] = pd.to_datetime(df['date'])
 
@@ -71,7 +71,7 @@ results_df['predicted_probability_next_7d'] = test_probabilities
 results_df['probability_display'] = (results_df['predicted_probability_next_7d'] * 100).round(1).astype(str) + '%'
 
 # Define the output path and save
-output_csv_path = "/content/test_set_outbreak_predictions.csv"
+output_csv_path = "/content/aimsktt_viralwatch/ml/results/test_set_outbreak_predictions.csv"
 results_df.to_csv(output_csv_path, index=False)
 
 print(f" [+] Success! Test set predictions saved to: {output_csv_path}")
