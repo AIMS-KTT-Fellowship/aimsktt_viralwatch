@@ -1,22 +1,27 @@
-# The name of the automation workflow
-name: Simple Demo Workflow
+name: 30 Second Continuous Loop
 
-# The event that triggers the automation
-on: [push]
+on:
+  # Allows you to start the loop manually from the GitHub UI Actions tab
+  workflow_dispatch:
 
-# The execution block containing one or more jobs
 jobs:
-  say-hello:
-    # The type of virtual machine the runner will use
+  continuous-run:
     runs-on: ubuntu-latest
 
-    # The sequence of tasks to execute
     steps:
-      # Step 1: Downloads a copy of your repository code onto the runner
-      - name: Check out repository code
+      - name: Check out code
         uses: actions/checkout@v4
 
-      # Step 2: Executes a terminal command
-      - name: Print a message
-        run: echo "Hello, world! Your GitHub Action is working successfully."
+      - name: Run loop every 30 seconds
+        run: |
+          echo "Starting continuous loop..."
+          while true; do
+            echo "Task executed at: $(date)"
+            
+            # --- PUT YOUR COMMANDS HERE ---
+            # Example: python script.py or curl https://example.com
+            # ------------------------------
 
+            echo "Sleeping for 30 seconds..."
+            sleep 30
+          done
